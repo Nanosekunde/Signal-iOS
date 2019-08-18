@@ -1,25 +1,29 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSGenericAttachmentView.h"
 #import "OWSBezierPathView.h"
-#import "UIColor+JSQMessages.h"
-#import "UIColor+OWS.h"
+#import "Signal-Swift.h"
 #import "UIFont+OWS.h"
 #import "UIView+OWS.h"
 #import "ViewControllerUtils.h"
-#import <SignalMessaging/NSString+OWS.h>
 #import <SignalMessaging/OWSFormat.h>
+#import <SignalMessaging/UIColor+OWS.h>
 #import <SignalServiceKit/MimeTypeUtil.h>
+#import <SignalServiceKit/NSString+SSK.h>
 #import <SignalServiceKit/TSAttachmentStream.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @interface OWSGenericAttachmentView ()
 
-@property (nonatomic) TSAttachmentStream *attachmentStream;
+@property (nonatomic) TSAttachment *attachment;
+@property (nonatomic, nullable) TSAttachmentStream *attachmentStream;
+@property (nonatomic, weak) id<ConversationViewItem> viewItem;
 @property (nonatomic) BOOL isIncoming;
+@property (nonatomic) UILabel *topLabel;
+@property (nonatomic) UILabel *bottomLabel;
 
 @end
 
@@ -27,184 +31,209 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSGenericAttachmentView
 
-- (instancetype)initWithAttachment:(TSAttachmentStream *)attachmentStream isIncoming:(BOOL)isIncoming
+- (instancetype)initWithAttachment:(TSAttachment *)attachment
+                        isIncoming:(BOOL)isIncoming
+                          viewItem:(id<ConversationViewItem>)viewItem
 {
     self = [super init];
 
     if (self) {
-        _attachmentStream = attachmentStream;
+        _attachment = attachment;
+        if ([attachment isKindOfClass:[TSAttachmentStream class]]) {
+            _attachmentStream = (TSAttachmentStream *)attachment;
+        }
         _isIncoming = isIncoming;
+        _viewItem = viewItem;
     }
 
     return self;
 }
 
-#pragma mark - JSQMessageMediaData protocol
+#pragma mark -
 
-- (CGFloat)iconHMargin
+- (CGFloat)hMargin
 {
-    return 12.f;
+    return 0.f;
 }
 
-- (CGFloat)iconHSpacing
+- (CGFloat)hSpacing
 {
-    return 10.f;
-}
-
-+ (CGFloat)iconVMargin
-{
-    return 12.f;
-}
-
-- (CGFloat)iconVMargin
-{
-    return [OWSGenericAttachmentView iconVMargin];
-}
-
-+ (CGFloat)bubbleHeight
-{
-    return self.iconSize + self.iconVMargin * 2;
-}
-
-- (CGFloat)bubbleHeight
-{
-    return [OWSGenericAttachmentView bubbleHeight];
-}
-
-+ (CGFloat)iconSize
-{
-    return 40.f;
-}
-
-- (CGFloat)iconSize
-{
-    return [OWSGenericAttachmentView iconSize];
+    return 8.f;
 }
 
 - (CGFloat)vMargin
 {
-    return 10.f;
+    return 5.f;
 }
 
-- (UIColor *)bubbleBackgroundColor
+- (CGSize)measureSizeWithMaxMessageWidth:(CGFloat)maxMessageWidth
 {
-    return self.isIncoming ? [UIColor jsq_messageBubbleLightGrayColor] : [UIColor ows_materialBlueColor];
+    CGSize result = CGSizeZero;
+
+    CGFloat labelsHeight = ([OWSGenericAttachmentView topLabelFont].lineHeight +
+        [OWSGenericAttachmentView bottomLabelFont].lineHeight + [OWSGenericAttachmentView labelVSpacing]);
+    CGFloat contentHeight = MAX(self.iconHeight, labelsHeight);
+    result.height = contentHeight + self.vMargin * 2;
+
+    CGFloat labelsWidth
+        = MAX([self.topLabel sizeThatFits:CGSizeZero].width, [self.bottomLabel sizeThatFits:CGSizeZero].width);
+    CGFloat contentWidth = (self.iconWidth + labelsWidth + self.hSpacing);
+    result.width = MIN(maxMessageWidth, contentWidth + self.hMargin * 2);
+
+    return CGSizeCeil(result);
 }
 
-- (UIColor *)textColor
+- (CGFloat)iconWidth
 {
-    return (self.isIncoming ? [UIColor colorWithWhite:0.2f alpha:1.f] : [UIColor whiteColor]);
+    return 36.f;
 }
 
-- (UIColor *)foregroundColorWithOpacity:(CGFloat)alpha
+- (CGFloat)iconHeight
 {
-    return [self.textColor blendWithColor:self.bubbleBackgroundColor alpha:alpha];
+    return kStandardAvatarSize;
 }
 
-- (void)createContents
+- (void)createContentsWithConversationStyle:(ConversationStyle *)conversationStyle
 {
-    UIColor *textColor = (self.isIncoming ? [UIColor colorWithWhite:0.2 alpha:1.f] : [UIColor whiteColor]);
+    OWSAssertDebug(conversationStyle);
 
-    self.backgroundColor = self.bubbleBackgroundColor;
-    self.layoutMargins = UIEdgeInsetsZero;
+    self.axis = UILayoutConstraintAxisHorizontal;
+    self.alignment = UIStackViewAlignmentCenter;
+    self.spacing = self.hSpacing;
+    self.layoutMarginsRelativeArrangement = YES;
+    self.layoutMargins = UIEdgeInsetsMake(self.vMargin, 0, self.vMargin, 0);
 
-    // TODO: Verify that this layout works in RTL.
-    const CGFloat kBubbleTailWidth = 6.f;
-
-    UIView *contentView = [UIView containerView];
-    [self addSubview:contentView];
-    [contentView autoPinLeadingToSuperviewWithMargin:self.isIncoming ? kBubbleTailWidth : 0.f];
-    [contentView autoPinTrailingToSuperviewWithMargin:self.isIncoming ? 0.f : kBubbleTailWidth];
-    [contentView autoPinEdgeToSuperviewEdge:ALEdgeTop withInset:self.vMargin];
-    [contentView autoPinEdgeToSuperviewEdge:ALEdgeBottom withInset:self.vMargin];
-
-    OWSBezierPathView *iconCircleView = [OWSBezierPathView new];
-    UIColor *iconColor
-        = (self.isIncoming ? [UIColor colorWithRGBHex:0x9e9e9e] : [self foregroundColorWithOpacity:0.15f]);
-    iconCircleView.configureShapeLayerBlock = ^(CAShapeLayer *_Nonnull layer, CGRect bounds) {
-        layer.path = [UIBezierPath bezierPathWithOvalInRect:bounds].CGPath;
-        layer.fillColor = iconColor.CGColor;
-    };
-    [contentView addSubview:iconCircleView];
-    [iconCircleView autoPinLeadingToSuperviewWithMargin:self.iconHMargin];
-    [iconCircleView autoVCenterInSuperview];
-    [iconCircleView autoSetDimension:ALDimensionWidth toSize:self.iconSize];
-    [iconCircleView autoSetDimension:ALDimensionHeight toSize:self.iconSize];
-
-    UIImage *image = [UIImage imageNamed:@"generic-attachment-small"];
-    OWSAssert(image);
+    // attachment_file
+    UIImage *image = [UIImage imageNamed:@"generic-attachment"];
+    OWSAssertDebug(image);
+    OWSAssertDebug(image.size.width == self.iconWidth);
+    OWSAssertDebug(image.size.height == self.iconHeight);
     UIImageView *imageView = [UIImageView new];
-    imageView.image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-    imageView.tintColor = self.bubbleBackgroundColor;
-    [contentView addSubview:imageView];
-    [imageView autoPinEdge:ALEdgeLeft toEdge:ALEdgeLeft ofView:iconCircleView];
-    [imageView autoPinEdge:ALEdgeRight toEdge:ALEdgeRight ofView:iconCircleView];
-    [imageView autoPinEdge:ALEdgeTop toEdge:ALEdgeTop ofView:iconCircleView];
-    [imageView autoPinEdge:ALEdgeBottom toEdge:ALEdgeBottom ofView:iconCircleView];
+    imageView.image = image;
+    [self addArrangedSubview:imageView];
+    [imageView setContentHuggingHigh];
 
-    const CGFloat kLabelHSpacing = self.iconHSpacing;
-    UIView *labelsView = [UIView containerView];
-    [contentView addSubview:labelsView];
-    [labelsView autoPinLeadingToTrailingOfView:imageView margin:kLabelHSpacing];
-    [labelsView autoPinTrailingToSuperviewWithMargin:self.iconHMargin];
-    [labelsView autoVCenterInSuperview];
-
-    NSString *filename = self.attachmentStream.sourceFilename;
+    NSString *_Nullable filename = self.attachment.sourceFilename;
     if (!filename) {
-        filename = [[self.attachmentStream filePath] lastPathComponent];
+        filename = [[self.attachmentStream originalFilePath] lastPathComponent];
     }
     NSString *fileExtension = filename.pathExtension;
     if (fileExtension.length < 1) {
-        [MIMETypeUtil fileExtensionForMIMEType:self.attachmentStream.contentType];
-    }
-    if (fileExtension.length < 1) {
-        fileExtension = NSLocalizedString(@"GENERIC_ATTACHMENT_DEFAULT_TYPE",
-            @"A default label for attachment whose file extension cannot be determined.");
+        fileExtension = [MIMETypeUtil fileExtensionForMIMEType:self.attachment.contentType];
     }
 
     UILabel *fileTypeLabel = [UILabel new];
-    fileTypeLabel.text = fileExtension.uppercaseString;
-    fileTypeLabel.textColor = iconColor;
+    fileTypeLabel.text = fileExtension.localizedUppercaseString;
+    fileTypeLabel.textColor = [UIColor ows_gray90Color];
     fileTypeLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    fileTypeLabel.font = [UIFont ows_mediumFontWithSize:20.f];
+    fileTypeLabel.font = [UIFont ows_dynamicTypeCaption1Font].ows_mediumWeight;
     fileTypeLabel.adjustsFontSizeToFitWidth = YES;
     fileTypeLabel.textAlignment = NSTextAlignmentCenter;
     // Center on icon.
     [imageView addSubview:fileTypeLabel];
     [fileTypeLabel autoCenterInSuperview];
-    [fileTypeLabel autoSetDimension:ALDimensionWidth toSize:15.f];
+    [fileTypeLabel autoSetDimension:ALDimensionWidth toSize:self.iconWidth - 20.f];
 
-    const CGFloat kLabelVSpacing = 2;
-    NSString *topText = [self.attachmentStream.sourceFilename ows_stripped];
+    [self replaceIconWithDownloadProgressIfNecessary:imageView];
+
+    UIStackView *labelsView = [UIStackView new];
+    labelsView.axis = UILayoutConstraintAxisVertical;
+    labelsView.spacing = [OWSGenericAttachmentView labelVSpacing];
+    labelsView.alignment = UIStackViewAlignmentLeading;
+    [self addArrangedSubview:labelsView];
+
+    NSString *topText = [self.attachment.sourceFilename ows_stripped];
     if (topText.length < 1) {
-        topText = [MIMETypeUtil fileExtensionForMIMEType:self.attachmentStream.contentType].uppercaseString;
+        topText = [MIMETypeUtil fileExtensionForMIMEType:self.attachment.contentType].localizedUppercaseString;
     }
     if (topText.length < 1) {
         topText = NSLocalizedString(@"GENERIC_ATTACHMENT_LABEL", @"A label for generic attachments.");
     }
     UILabel *topLabel = [UILabel new];
+    self.topLabel = topLabel;
     topLabel.text = topText;
-    topLabel.textColor = textColor;
+    topLabel.textColor = [conversationStyle bubbleTextColorWithIsIncoming:self.isIncoming];
     topLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    topLabel.font = [UIFont ows_regularFontWithSize:ScaleFromIPhone5To7Plus(13.f, 15.f)];
-    [labelsView addSubview:topLabel];
-    [topLabel autoPinEdgeToSuperviewEdge:ALEdgeTop];
-    [topLabel autoPinWidthToSuperview];
+    topLabel.font = [OWSGenericAttachmentView topLabelFont];
+    [labelsView addArrangedSubview:topLabel];
 
-    NSError *error;
-    unsigned long long fileSize =
-        [[NSFileManager defaultManager] attributesOfItemAtPath:[self.attachmentStream filePath] error:&error].fileSize;
-    OWSAssert(!error);
-    NSString *bottomText = [OWSFormat formatFileSize:fileSize];
+    unsigned long long fileSize = 0;
+    if (self.attachmentStream) {
+        NSError *error;
+        fileSize = [[NSFileManager defaultManager] attributesOfItemAtPath:[self.attachmentStream originalFilePath]
+                                                                    error:&error]
+                       .fileSize;
+        OWSAssertDebug(!error);
+    }
+    // We don't want to show the file size while the attachment is downloading.
+    // To avoid layout jitter when the download completes, we reserve space in
+    // the layout using a whitespace string.
+    NSString *bottomText = @" ";
+    if (fileSize > 0) {
+        bottomText = [OWSFormat formatFileSize:fileSize];
+    }
     UILabel *bottomLabel = [UILabel new];
+    self.bottomLabel = bottomLabel;
     bottomLabel.text = bottomText;
-    bottomLabel.textColor = [textColor colorWithAlphaComponent:0.85f];
+    bottomLabel.textColor = [conversationStyle bubbleSecondaryTextColorWithIsIncoming:self.isIncoming];
     bottomLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    bottomLabel.font = [UIFont ows_regularFontWithSize:ScaleFromIPhone5To7Plus(11.f, 13.f)];
-    [labelsView addSubview:bottomLabel];
-    [bottomLabel autoPinWidthToSuperview];
-    [bottomLabel autoPinEdge:ALEdgeTop toEdge:ALEdgeBottom ofView:topLabel withOffset:kLabelVSpacing];
-    [bottomLabel autoPinEdgeToSuperviewEdge:ALEdgeBottom];
+    bottomLabel.font = [OWSGenericAttachmentView bottomLabelFont];
+    [labelsView addArrangedSubview:bottomLabel];
+}
+
+- (void)replaceIconWithDownloadProgressIfNecessary:(UIView *)iconView
+{
+    if (!self.viewItem.attachmentPointer) {
+        return;
+    }
+
+    switch (self.viewItem.attachmentPointer.state) {
+        case TSAttachmentPointerStateFailed:
+            // We don't need to handle the "tap to retry" state here,
+            // only download progress.
+            return;
+        case TSAttachmentPointerStateEnqueued:
+        case TSAttachmentPointerStateDownloading:
+            break;
+    }
+    switch (self.viewItem.attachmentPointer.pointerType) {
+        case TSAttachmentPointerTypeRestoring:
+            // TODO: Show "restoring" indicator and possibly progress.
+            return;
+        case TSAttachmentPointerTypeUnknown:
+        case TSAttachmentPointerTypeIncoming:
+            break;
+    }
+    NSString *_Nullable uniqueId = self.viewItem.attachmentPointer.uniqueId;
+    if (uniqueId.length < 1) {
+        OWSFailDebug(@"Missing uniqueId.");
+        return;
+    }
+
+    CGSize iconViewSize = [iconView sizeThatFits:CGSizeZero];
+    CGFloat downloadViewSize = MIN(iconViewSize.width, iconViewSize.height);
+    MediaDownloadView *downloadView =
+        [[MediaDownloadView alloc] initWithAttachmentId:uniqueId radius:downloadViewSize * 0.5f];
+    iconView.layer.opacity = 0.01f;
+    [self addSubview:downloadView];
+    [downloadView autoSetDimensionsToSize:CGSizeMake(downloadViewSize, downloadViewSize)];
+    [downloadView autoAlignAxis:ALAxisHorizontal toSameAxisOfView:iconView];
+    [downloadView autoAlignAxis:ALAxisVertical toSameAxisOfView:iconView];
+}
+
++ (UIFont *)topLabelFont
+{
+    return [UIFont ows_dynamicTypeBodyFont];
+}
+
++ (UIFont *)bottomLabelFont
+{
+    return [UIFont ows_dynamicTypeCaption1Font];
+}
+
++ (CGFloat)labelVSpacing
+{
+    return 2.f;
 }
 
 @end

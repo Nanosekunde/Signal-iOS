@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "MIMETypeUtil.h"
@@ -17,8 +17,17 @@ NS_ASSUME_NONNULL_BEGIN
 
 NSString *const OWSMimeTypeApplicationOctetStream = @"application/octet-stream";
 NSString *const OWSMimeTypeImagePng = @"image/png";
+NSString *const OWSMimeTypeImageJpeg = @"image/jpeg";
+NSString *const OWSMimeTypeImageGif = @"image/gif";
+NSString *const OWSMimeTypeImageTiff1 = @"image/tiff";
+NSString *const OWSMimeTypeImageTiff2 = @"image/x-tiff";
+NSString *const OWSMimeTypeImageBmp1 = @"image/bmp";
+NSString *const OWSMimeTypeImageBmp2 = @"image/x-windows-bmp";
+NSString *const OWSMimeTypeImageWebp = @"image/webp";
+NSString *const OWSMimeTypeImagePdf = @"application/pdf";
 NSString *const OWSMimeTypeOversizeTextMessage = @"text/x-signal-plain";
 NSString *const OWSMimeTypeUnknownForTests = @"unknown/mimetype";
+NSString *const OWSMimeTypeApplicationZip = @"application/zip";
 
 NSString *const kOversizeTextAttachmentUTI = @"org.whispersystems.oversize-text-attachment";
 NSString *const kOversizeTextAttachmentFileExtension = @"txt";
@@ -36,7 +45,8 @@ NSString *const kSyncMessageFileExtension = @"bin";
             @"video/3gpp2" : @"3g2",
             @"video/mp4" : @"mp4",
             @"video/quicktime" : @"mov",
-            @"video/x-m4v" : @"m4v"
+            @"video/x-m4v" : @"m4v",
+            @"video/mpeg" : @"mpg",
         };
     });
     return result;
@@ -60,11 +70,10 @@ NSString *const kSyncMessageFileExtension = @"bin";
             @"audio/mpeg3" : @"mp3",
             @"audio/x-mp3" : @"mp3",
             @"audio/x-mpeg3" : @"mp3",
-            @"audio/amr" : @"amr",
             @"audio/aiff" : @"aiff",
             @"audio/x-aiff" : @"aiff",
             @"audio/3gpp2" : @"3g2",
-            @"audio/3gpp" : @"3gp"
+            @"audio/3gpp" : @"3gp",
         };
     });
     return result;
@@ -75,13 +84,14 @@ NSString *const kSyncMessageFileExtension = @"bin";
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         result = @{
-            @"image/jpeg" : @"jpeg",
+            OWSMimeTypeImageJpeg : @"jpeg",
             @"image/pjpeg" : @"jpeg",
             OWSMimeTypeImagePng : @"png",
             @"image/tiff" : @"tif",
             @"image/x-tiff" : @"tif",
             @"image/bmp" : @"bmp",
-            @"image/x-windows-bmp" : @"bmp"
+            @"image/x-windows-bmp" : @"bmp",
+            OWSMimeTypeImageWebp : @"webp",
         };
     });
     return result;
@@ -92,7 +102,7 @@ NSString *const kSyncMessageFileExtension = @"bin";
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         result = @{
-            @"image/gif" : @"gif",
+            OWSMimeTypeImageGif : @"gif",
         };
     });
     return result;
@@ -122,7 +132,9 @@ NSString *const kSyncMessageFileExtension = @"bin";
             @"mp4" : @"video/mp4",
             @"mov" : @"video/quicktime",
             @"mqv" : @"video/quicktime",
-            @"m4v" : @"video/x-m4v"
+            @"m4v" : @"video/x-m4v",
+            @"mpg" : @"video/mpeg",
+            @"mpeg" : @"video/mpeg",
         };
     });
     return result;
@@ -141,12 +153,9 @@ NSString *const kSyncMessageFileExtension = @"bin";
             @"aif" : @"audio/aiff",
             @"aifc" : @"audio/aiff",
             @"cdda" : @"audio/aiff",
-            @"amr" : @"audio/amr",
             @"mp3" : @"audio/mp3",
             @"swa" : @"audio/mp3",
             @"mp4" : @"audio/mp4",
-            @"mpeg" : @"audio/mpeg",
-            @"mpg" : @"audio/mpeg",
             @"wav" : @"audio/wav",
             @"bwf" : @"audio/wav",
             @"m4a" : @"audio/x-m4a",
@@ -172,7 +181,8 @@ NSString *const kSyncMessageFileExtension = @"bin";
             @"jpeg" : @"image/jpeg",
             @"jpg" : @"image/jpeg",
             @"tif" : @"image/tiff",
-            @"tiff" : @"image/tiff"
+            @"tiff" : @"image/tiff",
+            @"webp" : OWSMimeTypeImageWebp,
         };
     });
     return result;
@@ -183,7 +193,7 @@ NSString *const kSyncMessageFileExtension = @"bin";
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         result = @{
-            @"gif" : @"image/gif",
+            @"gif" : OWSMimeTypeImageGif,
         };
     });
     return result;
@@ -274,6 +284,23 @@ NSString *const kSyncMessageFileExtension = @"bin";
     return [MIMETypeUtil isSupportedAudioMIMEType:contentType];
 }
 
++ (BOOL)isVisualMedia:(NSString *)contentType
+{
+    if ([self isImage:contentType]) {
+        return YES;
+    }
+
+    if ([self isVideo:contentType]) {
+        return YES;
+    }
+
+    if ([self isAnimated:contentType]) {
+        return YES;
+    }
+
+    return NO;
+}
+
 + (nullable NSString *)filePathForAttachment:(NSString *)uniqueId
                                   ofMIMEType:(NSString *)contentType
                               sourceFilename:(nullable NSString *)sourceFilename
@@ -357,7 +384,7 @@ NSString *const kSyncMessageFileExtension = @"bin";
         return [self filePathForData:uniqueId withFileExtension:fileExtension inFolder:folder];
     }
 
-    DDLogError(@"Got asked for path of file %@ which is unsupported", contentType);
+    OWSLogError(@"Got asked for path of file %@ which is unsupported", contentType);
     // Use a fallback file extension.
     return [self filePathForData:uniqueId withFileExtension:kDefaultFileExtension inFolder:folder];
 }
@@ -451,7 +478,7 @@ NSString *const kSyncMessageFileExtension = @"bin";
     for (NSString *mimeType in mimeTypes) {
         NSString *_Nullable utiType = [self utiTypeForMIMEType:mimeType];
         if (!utiType) {
-            OWSFail(@"%@ unknown utiType for mimetype: %@", self.logTag, mimeType);
+            OWSFailDebug(@"unknown utiType for mimetype: %@", mimeType);
             continue;
         }
         [result addObject:utiType];
@@ -461,7 +488,6 @@ NSString *const kSyncMessageFileExtension = @"bin";
 
 + (NSSet<NSString *> *)supportedVideoUTITypes
 {
-    OWSAssertIsOnMainThread();
     static NSSet<NSString *> *result = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -472,7 +498,6 @@ NSString *const kSyncMessageFileExtension = @"bin";
 
 + (NSSet<NSString *> *)supportedAudioUTITypes
 {
-    OWSAssertIsOnMainThread();
     static NSSet<NSString *> *result = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -483,7 +508,6 @@ NSString *const kSyncMessageFileExtension = @"bin";
 
 + (NSSet<NSString *> *)supportedImageUTITypes
 {
-    OWSAssertIsOnMainThread();
     static NSSet<NSString *> *result = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -494,7 +518,6 @@ NSString *const kSyncMessageFileExtension = @"bin";
 
 + (NSSet<NSString *> *)supportedAnimatedImageUTITypes
 {
-    OWSAssertIsOnMainThread();
     static NSSet<NSString *> *result = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -1254,7 +1277,7 @@ NSString *const kSyncMessageFileExtension = @"bin";
             @"application/yang" : @"yang",
             @"application/yin+xml" : @"yin",
             @"application/ynd.ms-pkipko" : @"pko",
-            @"application/zip" : @"zip",
+            OWSMimeTypeApplicationZip : @"zip",
             @"audio/aac" : @"aac",
             @"audio/adpcm" : @"adp",
             @"audio/aiff" : @"aiff",
@@ -1572,7 +1595,7 @@ NSString *const kSyncMessageFileExtension = @"bin";
 
 + (nullable NSString *)mimeTypeForFileExtension:(NSString *)fileExtension
 {
-    OWSAssert(fileExtension.length > 0);
+    OWSAssertDebug(fileExtension.length > 0);
 
     return [self genericExtensionTypesToMIMETypes][fileExtension];
 }
@@ -2561,7 +2584,7 @@ NSString *const kSyncMessageFileExtension = @"bin";
             @"z7" : @"application/x-zmachine",
             @"z8" : @"application/x-zmachine",
             @"zaz" : @"application/vnd.zzazz.deck+xml",
-            @"zip" : @"application/zip",
+            @"zip" : OWSMimeTypeApplicationZip,
             @"zir" : @"application/vnd.zul",
             @"zirz" : @"application/vnd.zul",
             @"zmm" : @"application/vnd.handheld-entertainment+xml",
@@ -2593,7 +2616,7 @@ NSString *const kSyncMessageFileExtension = @"bin";
 
 + (nullable NSString *)utiTypeForFileExtension:(NSString *)fileExtension
 {
-    OWSAssert(fileExtension.length > 0);
+    OWSAssertDebug(fileExtension.length > 0);
 
     NSString *_Nullable utiType = (__bridge_transfer NSString *)UTTypeCreatePreferredIdentifierForTag(
         kUTTagClassFilenameExtension, (__bridge CFStringRef)fileExtension, NULL);

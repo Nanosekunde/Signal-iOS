@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import XCTest
@@ -18,9 +18,17 @@ enum PushNotificationRequestResult: String {
 }
 
 class FailingTSAccountManager: TSAccountManager {
-    let phoneNumberAwaitingVerification = "+13235555555"
+    override public init() {
+        AssertIsOnMainThread()
 
-    override func verifyAccount(withCode: String, success: @escaping () -> Void, failure: @escaping (Error) -> Void) {
+        super.init()
+
+        self.phoneNumberAwaitingVerification = "+13235555555"
+    }
+
+    override func verifyAccount(withCode: String,
+                                pin: String?,
+                                success: @escaping () -> Void, failure: @escaping (Error) -> Void) {
         failure(VerificationFailedError())
     }
 
@@ -34,31 +42,48 @@ class FailingTSAccountManager: TSAccountManager {
 }
 
 class VerifyingTSAccountManager: FailingTSAccountManager {
-    override func verifyAccount(withCode: String, success: @escaping () -> Void, failure: @escaping (Error) -> Void) {
+    override func verifyAccount(withCode: String,
+                                pin: String?,
+                                success: @escaping () -> Void, failure: @escaping (Error) -> Void) {
         success()
     }
 
-    override func registerForManualMessageFetching(success successBlock: @escaping () -> Swift.Void, failure failureBlock: @escaping (Error) -> Swift.Void) {
-        successBlock()
+    override func performUpdateAccountAttributes() -> AnyPromise {
+        return AnyPromise(Promise.value(()))
     }
 }
 
 class TokenObtainingTSAccountManager: VerifyingTSAccountManager {
 }
 
-class AccountManagerTest: XCTestCase {
+class VerifyingPushRegistrationManager: PushRegistrationManager {
+    public override func requestPushTokens() -> Promise<(pushToken: String, voipToken: String)> {
+        return Promise.value(("a", "b"))
+    }
+}
 
-    let tsAccountManager = FailingTSAccountManager(networkManager: TSNetworkManager.shared(), storageManager: TSStorageManager.shared())
-    var preferences = OWSPreferences()
+class AccountManagerTest: SignalBaseTest {
+
+    override func setUp() {
+        super.setUp()
+
+        let tsAccountManager = FailingTSAccountManager()
+        let sskEnvironment = SSKEnvironment.shared as! MockSSKEnvironment
+        sskEnvironment.tsAccountManager = tsAccountManager
+    }
+
+    override func tearDown() {
+        super.tearDown()
+    }
 
     func testRegisterWhenEmptyCode() {
-        let accountManager = AccountManager(textSecureAccountManager: tsAccountManager, preferences: self.preferences)
+        let accountManager = AccountManager()
 
         let expectation = self.expectation(description: "should fail")
 
         firstly {
-            accountManager.register(verificationCode: "")
-        }.then {
+            accountManager.register(verificationCode: "", pin: "")
+        }.done {
             XCTFail("Should fail")
         }.catch { error in
             let nserror = error as NSError
@@ -67,19 +92,19 @@ class AccountManagerTest: XCTestCase {
             } else {
                 XCTFail("Unexpected error: \(error)")
             }
-        }
+        }.retainUntilComplete()
 
         self.waitForExpectations(timeout: 1.0, handler: nil)
     }
 
     func testRegisterWhenVerificationFails() {
-        let accountManager = AccountManager(textSecureAccountManager: tsAccountManager, preferences: self.preferences)
+        let accountManager = AccountManager()
 
         let expectation = self.expectation(description: "should fail")
 
         firstly {
-            accountManager.register(verificationCode: "123456")
-        }.then {
+            accountManager.register(verificationCode: "123456", pin: "")
+        }.done {
             XCTFail("Should fail")
         }.catch { error in
             if error is VerificationFailedError {
@@ -87,44 +112,46 @@ class AccountManagerTest: XCTestCase {
             } else {
                 XCTFail("Unexpected error: \(error)")
             }
-        }
+        }.retainUntilComplete()
 
         self.waitForExpectations(timeout: 1.0, handler: nil)
     }
 
     func testSuccessfulRegistration() {
-        Environment.clearCurrentForTests()
-        Environment.setCurrent(Release.releaseEnvironment())
+        let tsAccountManager = TokenObtainingTSAccountManager()
+        let sskEnvironment = SSKEnvironment.shared as! MockSSKEnvironment
+        sskEnvironment.tsAccountManager = tsAccountManager
 
-        let tsAccountManager = TokenObtainingTSAccountManager(networkManager: TSNetworkManager.shared(), storageManager: TSStorageManager.shared())
+        AppEnvironment.shared.pushRegistrationManager = VerifyingPushRegistrationManager()
 
-        let accountManager = AccountManager(textSecureAccountManager: tsAccountManager, preferences: self.preferences)
+        let accountManager = AccountManager()
 
         let expectation = self.expectation(description: "should succeed")
 
         firstly {
-            accountManager.register(verificationCode: "123456")
-        }.then {
+            accountManager.register(verificationCode: "123456", pin: "")
+        }.done {
             expectation.fulfill()
         }.catch { error in
             XCTFail("Unexpected error: \(error)")
-        }
+        }.retainUntilComplete()
 
         self.waitForExpectations(timeout: 1.0, handler: nil)
     }
 
     func testUpdatePushTokens() {
-        let accountManager = AccountManager(textSecureAccountManager: tsAccountManager, preferences: self.preferences)
+        let accountManager = AccountManager()
 
         let expectation = self.expectation(description: "should fail")
 
-        accountManager.updatePushTokens(pushToken: PushNotificationRequestResult.FailTSOnly.rawValue, voipToken: "whatever").then {
+        firstly {
+            accountManager.updatePushTokens(pushToken: PushNotificationRequestResult.FailTSOnly.rawValue, voipToken: "whatever")
+        }.done {
             XCTFail("Expected to fail.")
         }.catch { _ in
             expectation.fulfill()
-        }
+        }.retainUntilComplete()
 
         self.waitForExpectations(timeout: 1.0, handler: nil)
     }
-
 }

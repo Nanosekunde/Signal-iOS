@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import <SignalServiceKit/Contact.h>
@@ -10,6 +10,8 @@ NS_ASSUME_NONNULL_BEGIN
 extern NSString *const OWSContactsManagerSignalAccountsDidChangeNotification;
 
 @class ImageCache;
+@class OWSPrimaryStorage;
+@class SDSKeyValueStore;
 @class SignalAccount;
 @class UIFont;
 
@@ -20,9 +22,13 @@ extern NSString *const OWSContactsManagerSignalAccountsDidChangeNotification;
 
 #pragma mark - Setup
 
-- (void)startObserving;
+- (instancetype)init NS_UNAVAILABLE;
+
+- (id)initWithPrimaryStorage:(OWSPrimaryStorage *)primaryStorage;
 
 #pragma mark - Accessors
+
+@property (nonatomic, readonly) SDSKeyValueStore *keyValueStore;
 
 @property (nonnull, readonly) ImageCache *avatarCache;
 
@@ -32,17 +38,23 @@ extern NSString *const OWSContactsManagerSignalAccountsDidChangeNotification;
 
 // order of the signalAccounts array respects the systems contact sorting preference
 @property (atomic, readonly) NSArray<SignalAccount *> *signalAccounts;
-- (nullable SignalAccount *)signalAccountForRecipientId:(NSString *)recipientId;
+
+// This will return an instance of SignalAccount for _known_ signal accounts.
+- (nullable SignalAccount *)fetchSignalAccountForRecipientId:(NSString *)recipientId;
+// This will always return an instance of SignalAccount.
+- (SignalAccount *)fetchOrBuildSignalAccountForRecipientId:(NSString *)recipientId;
 - (BOOL)hasSignalAccountForRecipientId:(NSString *)recipientId;
 
-- (void)loadSignalAccountsFromCache;
 #pragma mark - System Contact Fetching
 
 // Must call `requestSystemContactsOnce` before accessing this method
 @property (nonatomic, readonly) BOOL isSystemContactsAuthorized;
+@property (nonatomic, readonly) BOOL isSystemContactsDenied;
 @property (nonatomic, readonly) BOOL systemContactsHaveBeenRequestedAtLeastOnce;
 
 @property (nonatomic, readonly) BOOL supportsContactEditing;
+
+@property (atomic, readonly) BOOL isSetup;
 
 // Request systems contacts and start syncing changes. The user will see an alert
 // if they haven't previously.
@@ -60,8 +72,9 @@ extern NSString *const OWSContactsManagerSignalAccountsDidChangeNotification;
 
 #pragma mark - Util
 
+- (BOOL)isSystemContact:(NSString *)recipientId;
+- (BOOL)isSystemContactWithSignalAccount:(NSString *)recipientId;
 - (BOOL)hasNameInSystemContactsForRecipientId:(NSString *)recipientId;
-- (NSString *)displayNameForPhoneIdentifier:(nullable NSString *)identifier;
 - (NSString *)displayNameForSignalAccount:(SignalAccount *)signalAccount;
 
 /**
@@ -77,14 +90,21 @@ extern NSString *const OWSContactsManagerSignalAccountsDidChangeNotification;
 - (nullable NSString *)nameFromSystemContactsForRecipientId:(NSString *)recipientId;
 - (NSString *)stringForConversationTitleWithPhoneIdentifier:(NSString *)recipientId;
 
+- (nullable UIImage *)systemContactImageForPhoneIdentifier:(nullable NSString *)identifier;
+- (nullable UIImage *)profileImageForPhoneIdentifier:(nullable NSString *)identifier;
+- (nullable NSData *)profileImageDataForPhoneIdentifier:(nullable NSString *)identifier;
+
 - (nullable UIImage *)imageForPhoneIdentifier:(nullable NSString *)identifier;
-- (NSAttributedString *)formattedDisplayNameForSignalAccount:(SignalAccount *)signalAccount font:(UIFont *_Nonnull)font;
+- (NSAttributedString *)formattedDisplayNameForSignalAccount:(SignalAccount *)signalAccount font:(UIFont *)font;
 - (NSAttributedString *)formattedFullNameForRecipientId:(NSString *)recipientId font:(UIFont *)font;
 - (NSString *)contactOrProfileNameForPhoneIdentifier:(NSString *)recipientId;
 - (NSAttributedString *)attributedContactOrProfileNameForPhoneIdentifier:(NSString *)recipientId;
-- (NSAttributedString *)attributedStringForConversationTitleWithPhoneIdentifier:(NSString *)recipientId
-                                                                    primaryFont:(UIFont *)primaryFont
-                                                                  secondaryFont:(UIFont *)secondaryFont;
+- (NSAttributedString *)attributedContactOrProfileNameForPhoneIdentifier:(NSString *)recipientId
+                                                             primaryFont:(UIFont *)primaryFont
+                                                           secondaryFont:(UIFont *)secondaryFont;
+- (NSAttributedString *)attributedContactOrProfileNameForPhoneIdentifier:(NSString *)recipientId
+                                                       primaryAttributes:(NSDictionary *)primaryAttributes
+                                                     secondaryAttributes:(NSDictionary *)secondaryAttributes;
 @end
 
 NS_ASSUME_NONNULL_END

@@ -1,15 +1,12 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSConversationSettingsViewDelegate.h"
-#import "OWSViewController.h"
+#import <SignalMessaging/OWSViewController.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @interface NewGroupViewController : OWSViewController
-
-@property (nonatomic, weak) id<OWSConversationSettingsViewDelegate> delegate;
 
 @end
 

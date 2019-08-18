@@ -1,16 +1,34 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "MainAppContext.h"
 #import "Signal-Swift.h"
+#import <SignalCoreKit/Threading.h>
 #import <SignalMessaging/Environment.h>
 #import <SignalMessaging/OWSProfileManager.h>
+#import <SignalMessaging/SignalMessaging-Swift.h>
 #import <SignalServiceKit/OWSIdentityManager.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
+NSString *const ReportedApplicationStateDidChangeNotification = @"ReportedApplicationStateDidChangeNotification";
+
+@interface MainAppContext ()
+
+@property (atomic) UIApplicationState reportedApplicationState;
+
+@property (nonatomic, nullable) NSMutableArray<AppActiveBlock> *appActiveBlocks;
+
+@end
+
+#pragma mark -
+
 @implementation MainAppContext
+
+@synthesize mainWindow = _mainWindow;
+@synthesize appLaunchTime = _appLaunchTime;
+@synthesize buildTime = _buildTime;
 
 - (instancetype)init
 {
@@ -19,6 +37,10 @@ NS_ASSUME_NONNULL_BEGIN
     if (!self) {
         return self;
     }
+
+    self.reportedApplicationState = UIApplicationStateInactive;
+
+    _appLaunchTime = [NSDate new];
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(applicationWillEnterForeground:)
@@ -41,6 +63,10 @@ NS_ASSUME_NONNULL_BEGIN
                                                  name:UIApplicationWillTerminateNotification
                                                object:nil];
 
+    // We can't use OWSSingletonAssert() since it uses the app context.
+
+    self.appActiveBlocks = [NSMutableArray new];
+
     return self;
 }
 
@@ -51,31 +77,73 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - Notifications
 
+- (void)setReportedApplicationState:(UIApplicationState)reportedApplicationState
+{
+    OWSAssertIsOnMainThread();
+
+    if (_reportedApplicationState == reportedApplicationState) {
+        return;
+    }
+    _reportedApplicationState = reportedApplicationState;
+
+    [[NSNotificationCenter defaultCenter] postNotificationName:ReportedApplicationStateDidChangeNotification
+                                                        object:nil
+                                                      userInfo:nil];
+}
+
 - (void)applicationWillEnterForeground:(NSNotification *)notification
 {
-    DDLogInfo(@"%@ %s", self.logTag, __PRETTY_FUNCTION__);
+    OWSAssertIsOnMainThread();
+
+    self.reportedApplicationState = UIApplicationStateInactive;
+
+    OWSLogInfo(@"");
+
+    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationWillEnterForegroundNotification object:nil];
 }
 
 - (void)applicationDidEnterBackground:(NSNotification *)notification
 {
-    DDLogInfo(@"%@ %s", self.logTag, __PRETTY_FUNCTION__);
+    OWSAssertIsOnMainThread();
+
+    self.reportedApplicationState = UIApplicationStateBackground;
+
+    OWSLogInfo(@"");
     [DDLog flushLog];
+
+    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationDidEnterBackgroundNotification object:nil];
 }
 
 - (void)applicationWillResignActive:(NSNotification *)notification
 {
-    DDLogInfo(@"%@ %s", self.logTag, __PRETTY_FUNCTION__);
+    OWSAssertIsOnMainThread();
+
+    self.reportedApplicationState = UIApplicationStateInactive;
+
+    OWSLogInfo(@"");
     [DDLog flushLog];
+
+    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationWillResignActiveNotification object:nil];
 }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification
 {
-    DDLogInfo(@"%@ %s", self.logTag, __PRETTY_FUNCTION__);
+    OWSAssertIsOnMainThread();
+
+    self.reportedApplicationState = UIApplicationStateActive;
+
+    OWSLogInfo(@"");
+
+    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationDidBecomeActiveNotification object:nil];
+
+    [self runAppActiveBlocks];
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification
 {
-    DDLogInfo(@"%@ %s", self.logTag, __PRETTY_FUNCTION__);
+    OWSAssertIsOnMainThread();
+
+    OWSLogInfo(@"");
     [DDLog flushLog];
 }
 
@@ -93,18 +161,33 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (BOOL)isRTL
 {
-    return
-        [[UIApplication sharedApplication] userInterfaceLayoutDirection] == UIUserInterfaceLayoutDirectionRightToLeft;
+    static BOOL isRTL = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        isRTL = [[UIApplication sharedApplication] userInterfaceLayoutDirection]
+            == UIUserInterfaceLayoutDirectionRightToLeft;
+    });
+    return isRTL;
 }
 
-- (void)setStatusBarStyle:(UIStatusBarStyle)statusBarStyle
+- (void)setStatusBarHidden:(BOOL)isHidden animated:(BOOL)isAnimated
 {
-    [[UIApplication sharedApplication] setStatusBarStyle:statusBarStyle];
+    [[UIApplication sharedApplication] setStatusBarHidden:isHidden animated:isAnimated];
 }
 
-- (UIApplicationState)mainApplicationState
+- (CGFloat)statusBarHeight
 {
-    return [UIApplication sharedApplication].applicationState;
+    return [UIApplication sharedApplication].statusBarFrame.size.height;
+}
+
+- (BOOL)isInBackground
+{
+    return self.reportedApplicationState == UIApplicationStateBackground;
+}
+
+- (BOOL)isAppForegroundAndActive
+{
+    return self.reportedApplicationState == UIApplicationStateActive;
 }
 
 - (UIBackgroundTaskIdentifier)beginBackgroundTaskWithExpirationHandler:
@@ -118,18 +201,18 @@ NS_ASSUME_NONNULL_BEGIN
     [UIApplication.sharedApplication endBackgroundTask:backgroundTaskIdentifier];
 }
 
-- (void)ensureSleepBlocking:(BOOL)shouldBeBlocking blockingObjects:(NSArray<id> *)blockingObjects;
+- (void)ensureSleepBlocking:(BOOL)shouldBeBlocking blockingObjects:(NSArray<id> *)blockingObjects
 {
     if (UIApplication.sharedApplication.isIdleTimerDisabled != shouldBeBlocking) {
         if (shouldBeBlocking) {
-            NSMutableString *logString = [NSMutableString
-                stringWithFormat:@"%@ Blocking sleep because of: %@", self.logTag, blockingObjects.firstObject];
+            NSMutableString *logString =
+                [NSMutableString stringWithFormat:@"Blocking sleep because of: %@", blockingObjects.firstObject];
             if (blockingObjects.count > 1) {
                 [logString appendString:[NSString stringWithFormat:@"(and %lu others)", blockingObjects.count - 1]];
             }
-            DDLogInfo(@"%@", logString);
+            OWSLogInfo(@"%@", logString);
         } else {
-            DDLogInfo(@"%@ Unblocking Sleep.", self.logTag);
+            OWSLogInfo(@"Unblocking Sleep.");
         }
     }
     UIApplication.sharedApplication.idleTimerDisabled = shouldBeBlocking;
@@ -145,24 +228,14 @@ NS_ASSUME_NONNULL_BEGIN
     return UIApplication.sharedApplication.frontmostViewControllerIgnoringAlerts;
 }
 
-- (nullable UIView *)rootReferenceView
+- (nullable UIAlertAction *)openSystemSettingsAction
 {
-    return UIApplication.sharedApplication.keyWindow;
-}
-
-- (void)openSystemSettings
-{
-    [UIApplication.sharedApplication openSystemSettings];
-}
-
-- (void)doMultiDeviceUpdateWithProfileKey:(OWSAES256Key *)profileKey
-{
-    OWSAssert(profileKey);
-
-    [MultiDeviceProfileKeyUpdateJob runWithProfileKey:profileKey
-                                      identityManager:OWSIdentityManager.sharedManager
-                                        messageSender:Environment.current.messageSender
-                                       profileManager:OWSProfileManager.sharedManager];
+    return [UIAlertAction actionWithTitle:CommonStrings.openSettingsButton
+                  accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"system_settings")
+                                    style:UIAlertActionStyleDefault
+                                  handler:^(UIAlertAction *_Nonnull action) {
+                                      [UIApplication.sharedApplication openSystemSettings];
+                                  }];
 }
 
 - (BOOL)isRunningTests
@@ -170,9 +243,97 @@ NS_ASSUME_NONNULL_BEGIN
     return getenv("runningTests_dontStartApp");
 }
 
+- (NSDate *)buildTime
+{
+    if (!_buildTime) {
+        NSInteger buildTimestamp =
+        [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"BuildDetails"][@"Timestamp"] integerValue];
+
+        if (buildTimestamp == 0) {
+            // Production builds should _always_ expire, ensure that here.
+            OWSAssert(OWSIsDebugBuild());
+
+            OWSLogDebug(@"No build timestamp, assuming app never expires.");
+            _buildTime = [NSDate distantFuture];
+        } else {
+            _buildTime = [NSDate dateWithTimeIntervalSince1970:buildTimestamp];
+        }
+    }
+
+    return _buildTime;
+}
+
 - (void)setNetworkActivityIndicatorVisible:(BOOL)value
 {
     [[UIApplication sharedApplication] setNetworkActivityIndicatorVisible:value];
+}
+
+#pragma mark -
+
+- (void)runNowOrWhenMainAppIsActive:(AppActiveBlock)block
+{
+    OWSAssertDebug(block);
+
+    DispatchMainThreadSafe(^{
+        if (self.isMainAppAndActive) {
+            // App active blocks typically will be used to safely access the
+            // shared data container, so use a background task to protect this
+            // work.
+            OWSBackgroundTask *_Nullable backgroundTask =
+                [OWSBackgroundTask backgroundTaskWithLabelStr:__PRETTY_FUNCTION__];
+            block();
+            OWSAssertDebug(backgroundTask);
+            backgroundTask = nil;
+            return;
+        }
+
+        [self.appActiveBlocks addObject:block];
+    });
+}
+
+- (void)runAppActiveBlocks
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(self.isMainAppAndActive);
+
+    // App active blocks typically will be used to safely access the
+    // shared data container, so use a background task to protect this
+    // work.
+    OWSBackgroundTask *_Nullable backgroundTask = [OWSBackgroundTask backgroundTaskWithLabelStr:__PRETTY_FUNCTION__];
+
+    NSArray<AppActiveBlock> *appActiveBlocks = [self.appActiveBlocks copy];
+    [self.appActiveBlocks removeAllObjects];
+    for (AppActiveBlock block in appActiveBlocks) {
+        block();
+    }
+
+    OWSAssertDebug(backgroundTask);
+    backgroundTask = nil;
+}
+
+- (id<SSKKeychainStorage>)keychainStorage
+{
+    return [SSKDefaultKeychainStorage shared];
+}
+
+- (NSString *)appDocumentDirectoryPath
+{
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSURL *documentDirectoryURL =
+        [[fileManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask] lastObject];
+    return [documentDirectoryURL path];
+}
+
+- (NSString *)appSharedDataDirectoryPath
+{
+    NSURL *groupContainerDirectoryURL =
+        [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:SignalApplicationGroup];
+    return [groupContainerDirectoryURL path];
+}
+
+- (NSUserDefaults *)appUserDefaults
+{
+    return [[NSUserDefaults alloc] initWithSuiteName:SignalApplicationGroup];
 }
 
 @end

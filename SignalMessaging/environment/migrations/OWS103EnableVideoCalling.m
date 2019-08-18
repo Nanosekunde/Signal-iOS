@@ -1,16 +1,28 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWS103EnableVideoCalling.h"
+#import <SignalServiceKit/OWSRequestFactory.h>
+#import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/TSAccountManager.h>
 #import <SignalServiceKit/TSNetworkManager.h>
-#import <SignalServiceKit/TSUpdateAttributesRequest.h>
 
 // Increment a similar constant for every future DBMigration
 static NSString *const OWS103EnableVideoCallingMigrationId = @"103";
 
 @implementation OWS103EnableVideoCalling
+
+#pragma mark - Dependencies
+
+- (TSAccountManager *)tsAccountManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.tsAccountManager);
+    
+    return SSKEnvironment.shared.tsAccountManager;
+}
+
+#pragma mark -
 
 + (NSString *)migrationId
 {
@@ -18,28 +30,36 @@ static NSString *const OWS103EnableVideoCallingMigrationId = @"103";
 }
 
 // Override parent migration
-- (void)runUp
+- (void)runUpWithCompletion:(OWSDatabaseMigrationCompletion)completion
 {
-    DDLogWarn(@"%@ running migration...", self.logTag);
-    if ([TSAccountManager isRegistered]) {
+    OWSAssertDebug(completion);
+
+    OWSLogWarn(@"running migration...");
+    if ([self.tsAccountManager isRegistered]) {
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            TSUpdateAttributesRequest *request = [[TSUpdateAttributesRequest alloc] initWithManualMessageFetching:NO];
+            TSRequest *request = [OWSRequestFactory updateAttributesRequest];
             [[TSNetworkManager sharedManager] makeRequest:request
                 success:^(NSURLSessionDataTask *task, id responseObject) {
-                    DDLogInfo(@"%@ successfully ran", self.logTag);
+                    OWSLogInfo(@"successfully ran");
                     [self save];
+
+                    completion();
                 }
                 failure:^(NSURLSessionDataTask *task, NSError *error) {
                     if (!IsNSErrorNetworkFailure(error)) {
                         OWSProdError([OWSAnalyticsEvents errorEnableVideoCallingRequestFailed]);
                     }
-                    DDLogError(@"%@ failed with error: %@", self.logTag, error);
+                    OWSLogError(@"failed with error: %@", error);
+
+                    completion();
                 }];
         });
     } else {
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            DDLogInfo(@"%@ skipping; not registered", self.logTag);
+            OWSLogInfo(@"skipping; not registered");
             [self save];
+
+            completion();
         });
     }
 }

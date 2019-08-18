@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -9,26 +9,27 @@ import SignalServiceKit
 @objc
 public class OWS106EnsureProfileComplete: OWSDatabaseMigration {
 
-    let TAG = "[OWS106EnsureProfileComplete]"
-
     private static var sharedCompleteRegistrationFixerJob: CompleteRegistrationFixerJob?
 
     // increment a similar constant for each migration.
+    @objc
     class func migrationId() -> String {
         return "106"
     }
 
     // Overriding runUp since we have some specific completion criteria which
     // is more likely to fail since it involves network requests.
-    override public func runUp() {
-        guard type(of: self).sharedCompleteRegistrationFixerJob == nil else {
-            owsFail("\(self.TAG) should only be called once.")
-            return
-        }
+    override public func runUp(completion:@escaping () -> Void) {
+        let job = CompleteRegistrationFixerJob(completionHandler: { (didSucceed) in
 
-        let job = CompleteRegistrationFixerJob(completionHandler: {
-            Logger.info("\(self.TAG) Completed. Saving.")
-            self.save()
+            if (didSucceed) {
+                Logger.info("Completed. Saving.")
+                self.save()
+            } else {
+                Logger.error("Failed.")
+            }
+
+            completion()
         })
 
         type(of: self).sharedCompleteRegistrationFixerJob = job
@@ -41,83 +42,82 @@ public class OWS106EnsureProfileComplete: OWSDatabaseMigration {
      * but never upload new pre-keys. The symptom is that there will be accounts with no uploaded
      * identity key. We detect that here and fix the situation
      */
-    private class CompleteRegistrationFixerJob {
+    private class CompleteRegistrationFixerJob: NSObject {
 
-        let TAG = "[CompleteRegistrationFixerJob]"
+        // MARK: - Dependencies
+
+        private var tsAccountManager: TSAccountManager {
+            return TSAccountManager.sharedInstance()
+        }
+
+        // MARK: -
 
         // Duration between retries if update fails.
-        static let kRetryInterval: TimeInterval = 5 * 60
+        let kRetryInterval: TimeInterval = 5
 
-        var timer: Timer?
-        let completionHandler: () -> Void
+        let completionHandler: (Bool) -> Void
 
-        init(completionHandler: @escaping () -> Void) {
+        init(completionHandler: @escaping (Bool) -> Void) {
             self.completionHandler = completionHandler
         }
 
         func start() {
-            assert(self.timer == nil)
+            guard tsAccountManager.isRegistered else {
+                self.completionHandler(true)
+                return
+            }
 
-            let timer = WeakTimer.scheduledTimer(timeInterval: CompleteRegistrationFixerJob.kRetryInterval, target: self, userInfo: nil, repeats: true) { [weak self] aTimer in
-                guard let strongSelf = self else {
-                    return
-                }
-
-                var isCompleted = false
-                strongSelf.ensureProfileComplete().then { _ -> Void in
-                    guard isCompleted == false else {
-                        Logger.info("Already saved. Skipping redundant call.")
+            self.ensureProfileComplete().done {
+                Logger.info("complete. Canceling timer and saving.")
+                self.completionHandler(true)
+            }.catch { error in
+                let nserror = error as NSError
+                if nserror.domain == TSNetworkManagerErrorDomain {
+                    // Don't retry if we had an unrecoverable error.
+                    // In particular, 401 (invalid auth) is unrecoverable.
+                    let isUnrecoverableError = nserror.code == 401
+                    if isUnrecoverableError {
+                        Logger.error("failed due to unrecoverable error: \(error). Aborting.")
+                        self.completionHandler(true)
                         return
                     }
-                    Logger.info("\(strongSelf.TAG) complete. Canceling timer and saving.")
-                    isCompleted = true
-                    aTimer.invalidate()
-                    strongSelf.completionHandler()
-                }.catch { error in
-                    Logger.error("\(strongSelf.TAG) failed with \(error). We'll try again in \(CompleteRegistrationFixerJob.kRetryInterval) seconds.")
-                }.retainUntilComplete()
-            }
-            self.timer = timer
+                }
 
-            timer.fire()
+                Logger.error("failed with \(error).")
+                self.completionHandler(false)
+            }.retainUntilComplete()
         }
 
         func ensureProfileComplete() -> Promise<Void> {
             guard let localRecipientId = TSAccountManager.localNumber() else {
                 // local app doesn't think we're registered, so nothing to worry about.
-                return Promise(value: ())
+                return Promise.value(())
             }
 
-            let (promise, fulfill, reject) = Promise<Void>.pending()
-
-            guard let networkManager = Environment.current().networkManager else {
-                owsFail("\(TAG) network manager was unexpectedly not set")
-                return Promise(error: OWSErrorMakeAssertionError())
-            }
-
-            ProfileFetcherJob(networkManager: networkManager).getProfile(recipientId: localRecipientId).then { _ -> Void in
-                Logger.info("\(self.TAG) verified recipient profile is in good shape: \(localRecipientId)")
-
-                fulfill()
-            }.catch { error in
+            return firstly {
+                ProfileFetcherJob().getProfile(recipientId: localRecipientId)
+            }.done { _ in
+                Logger.info("verified recipient profile is in good shape: \(localRecipientId)")
+            }.recover { error -> Promise<Void> in
                 switch error {
                 case SignalServiceProfile.ValidationError.invalidIdentityKey(let description):
-                    Logger.warn("\(self.TAG) detected incomplete profile for \(localRecipientId) error: \(description)")
-                    // This is the error condition we're looking for. Update prekeys to properly set the identity key, completing registration.
-                    TSPreKeyManager.registerPreKeys(with: .signedAndOneTime,
-                                                    success: {
-                                                        Logger.info("\(self.TAG) successfully uploaded pre-keys. Profile should be fixed.")
-                                                        fulfill()
-                    },
-                                                    failure: { _ in
-                                                        reject(OWSErrorWithCodeDescription(.signalServiceFailure, "\(self.TAG) Unknown error in \(#function)"))
-                    })
-                default:
-                    reject(error)
-                }
-            }.retainUntilComplete()
+                    Logger.warn("detected incomplete profile for \(localRecipientId) error: \(description)")
 
-            return promise
+                    let (promise, resolver) = Promise<Void>.pending()
+                    // This is the error condition we're looking for. Update prekeys to properly set the identity key, completing registration.
+                    TSPreKeyManager.createPreKeys(success: {
+                        Logger.info("successfully uploaded pre-keys. Profile should be fixed.")
+                        resolver.fulfill(())
+                    },
+                                                  failure: { _ in
+                                                    resolver.reject(OWSErrorWithCodeDescription(.signalServiceFailure, "\(self.logTag) Unknown error"))
+                    })
+
+                    return promise
+                default:
+                    throw error
+                }
+            }
         }
     }
 }

@@ -1,26 +1,27 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
-#import <SocketRocket/SRWebSocket.h>
+#import "OWSWebSocket.h"
 
-static void *SocketManagerStateObservationContext = &SocketManagerStateObservationContext;
+NS_ASSUME_NONNULL_BEGIN
 
-extern NSString *const kNSNotification_SocketManagerStateDidChange;
+@class TSRequest;
 
-typedef NS_ENUM(NSUInteger, SocketManagerState) {
-    SocketManagerStateClosed,
-    SocketManagerStateConnecting,
-    SocketManagerStateOpen,
-};
+@interface TSSocketManager : NSObject
 
-@interface TSSocketManager : NSObject <SRWebSocketDelegate>
+@property (class, readonly, nonatomic) TSSocketManager *shared;
 
-@property (nonatomic, readonly) SocketManagerState state;
+- (instancetype)init NS_DESIGNATED_INITIALIZER;
 
-+ (instancetype)sharedManager;
-
-- (instancetype)init NS_UNAVAILABLE;
+// Returns the "best" state of any of the sockets.
+//
+// We surface the socket state in various places in the UI.
+// We generally are trying to indicate/help resolve network
+// connectivity issues.  We want to show the "best" or "highest"
+// socket state of the sockets.  e.g. the UI should reflect
+// "open" if any of the sockets is open.
+- (OWSWebSocketState)highestSocketState;
 
 // If the app is in the foreground, we'll try to open the socket unless it's already
 // open or connecting.
@@ -31,6 +32,19 @@ typedef NS_ENUM(NSUInteger, SocketManagerState) {
 // might prolong how long we keep the socket open.
 //
 // This method can be called from any thread.
-+ (void)requestSocketOpen;
+- (void)requestSocketOpen;
+
+// This can be used to force the socket to close and re-open, if it is open.
+- (void)cycleSocket;
+
+#pragma mark - Message Sending
+
+- (BOOL)canMakeRequests;
+
+- (void)makeRequest:(TSRequest *)request
+            success:(TSSocketMessageSuccess)success
+            failure:(TSSocketMessageFailure)failure;
 
 @end
+
+NS_ASSUME_NONNULL_END

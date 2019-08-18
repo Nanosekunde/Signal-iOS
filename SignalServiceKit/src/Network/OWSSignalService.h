@@ -1,41 +1,37 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
 extern NSString *const kNSNotificationName_IsCensorshipCircumventionActiveDidChange;
 
-@class TSStorageManager;
-@class TSAccountManager;
 @class AFHTTPSessionManager;
+@class OWSPrimaryStorage;
+@class TSAccountManager;
 
 @interface OWSSignalService : NSObject
 
-/// For interacting with the Signal Service
-@property (nonatomic, readonly) AFHTTPSessionManager *signalServiceSessionManager;
-
-/// For uploading avatar assets.
+/// For uploading and downloading avatar assets and attachments
 @property (nonatomic, readonly) AFHTTPSessionManager *CDNSessionManager;
-
-@property (atomic, readonly) BOOL isCensorshipCircumventionActive;
-
-@property (atomic, readonly) BOOL hasCensoredPhoneNumber;
 
 + (instancetype)sharedInstance;
 
 - (instancetype)init NS_UNAVAILABLE;
 
-- (BOOL)isCensorshipCircumventionManuallyActivated;
-- (void)setIsCensorshipCircumventionManuallyActivated:(BOOL)value;
+#pragma mark - Censorship Circumvention
 
-#pragma mark - Censorship Circumvention Domain
+@property (atomic, readonly) BOOL isCensorshipCircumventionActive;
+@property (atomic, readonly) BOOL hasCensoredPhoneNumber;
+@property (atomic) BOOL isCensorshipCircumventionManuallyActivated;
+@property (atomic) BOOL isCensorshipCircumventionManuallyDisabled;
+@property (atomic, nullable) NSString *manualCensorshipCircumventionCountryCode;
 
-- (NSString *)manualCensorshipCircumventionDomain;
-- (void)setManualCensorshipCircumventionDomain:(NSString *)value;
+/// should only be accessed if censorship circumvention is active.
+@property (nonatomic, readonly) NSURL *domainFrontBaseURL;
 
-- (NSString *)manualCensorshipCircumventionCountryCode;
-- (void)setManualCensorshipCircumventionCountryCode:(NSString *)value;
+/// For interacting with the Signal Service
+- (AFHTTPSessionManager *)buildSignalServiceSessionManager;
 
 @end
 

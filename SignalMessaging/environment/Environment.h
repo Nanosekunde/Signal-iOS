@@ -1,9 +1,16 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSPreferences.h"
-#import <SignalServiceKit/TSStorageHeaders.h>
+#import <SignalServiceKit/SSKEnvironment.h>
+
+@class OWSAudioSession;
+@class OWSContactsManager;
+@class OWSPreferences;
+@class OWSSounds;
+@class OWSWindowManager;
+
+@protocol OWSProximityMonitoringManager;
 
 /**
  *
@@ -12,33 +19,29 @@
  * It also handles network configuration for testing/deployment server configurations.
  *
  **/
-
-@class ContactsUpdater;
-@class OWSContactsManager;
-@class OWSMessageSender;
-@class TSGroupThread;
-@class TSNetworkManager;
-@class TSThread;
-@class UINavigationController;
-
+// TODO: Rename to SMGEnvironment?
 @interface Environment : NSObject
 
-- (instancetype)initWithContactsManager:(OWSContactsManager *)contactsManager
-                        contactsUpdater:(ContactsUpdater *)contactsUpdater
-                         networkManager:(TSNetworkManager *)networkManager
-                          messageSender:(OWSMessageSender *)messageSender;
+- (instancetype)init NS_UNAVAILABLE;
 
+- (instancetype)initWithAudioSession:(OWSAudioSession *)audioSession
+                         preferences:(OWSPreferences *)preferences
+          proximityMonitoringManager:(id<OWSProximityMonitoringManager>)proximityMonitoringManager
+                              sounds:(OWSSounds *)sounds
+                       windowManager:(OWSWindowManager *)windowManager;
+
+@property (nonatomic, readonly) OWSAudioSession *audioSession;
 @property (nonatomic, readonly) OWSContactsManager *contactsManager;
-@property (nonatomic, readonly) ContactsUpdater *contactsUpdater;
-@property (nonatomic, readonly) TSNetworkManager *networkManager;
-@property (nonatomic, readonly) OWSMessageSender *messageSender;
+@property (nonatomic, readonly) id<OWSProximityMonitoringManager> proximityMonitoringManager;
 @property (nonatomic, readonly) OWSPreferences *preferences;
+@property (nonatomic, readonly) OWSSounds *sounds;
+@property (nonatomic, readonly) OWSWindowManager *windowManager;
 
-+ (Environment *)current;
-+ (void)setCurrent:(Environment *)environment;
+@property (class, nonatomic) Environment *shared;
+
+#ifdef DEBUG
 // Should only be called by tests.
-+ (void)clearCurrentForTests;
-
-+ (OWSPreferences *)preferences;
++ (void)clearSharedForTests;
+#endif
 
 @end

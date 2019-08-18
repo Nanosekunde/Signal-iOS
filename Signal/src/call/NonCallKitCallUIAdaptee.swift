@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -11,35 +11,39 @@ import SignalMessaging
  */
 class NonCallKitCallUIAdaptee: NSObject, CallUIAdaptee {
 
-    let TAG = "[NonCallKitCallUIAdaptee]"
-
-    let notificationsAdapter: CallNotificationsAdapter
+    let notificationPresenter: NotificationPresenter
     let callService: CallService
 
     // Starting/Stopping incoming call ringing is our apps responsibility for the non CallKit interface.
     let hasManualRinger = true
 
-    required init(callService: CallService, notificationsAdapter: CallNotificationsAdapter) {
+    required init(callService: CallService, notificationPresenter: NotificationPresenter) {
         AssertIsOnMainThread()
 
         self.callService = callService
-        self.notificationsAdapter = notificationsAdapter
+        self.notificationPresenter = notificationPresenter
 
         super.init()
-
-        SwiftSingletons.register(self)
     }
+
+    // MARK: Dependencies
+
+    var audioSession: OWSAudioSession {
+        return Environment.shared.audioSession
+    }
+
+    // MARK: 
 
     func startOutgoingCall(handle: String) -> SignalCall {
         AssertIsOnMainThread()
 
         let call = SignalCall.outgoingCall(localId: UUID(), remotePhoneNumber: handle)
 
-        self.callService.handleOutgoingCall(call).then {
-            Logger.debug("\(self.TAG) handleOutgoingCall succeeded")
-        }.catch { error in
-            Logger.error("\(self.TAG) handleOutgoingCall failed with error: \(error)")
-        }.retainUntilComplete()
+        // make sure we don't terminate audio session during call
+        let success = self.audioSession.startAudioActivity(call.audioActivity)
+        assert(success)
+
+        self.callService.handleOutgoingCall(call).retainUntilComplete()
 
         return call
     }
@@ -47,34 +51,34 @@ class NonCallKitCallUIAdaptee: NSObject, CallUIAdaptee {
     func reportIncomingCall(_ call: SignalCall, callerName: String) {
         AssertIsOnMainThread()
 
-        Logger.debug("\(TAG) \(#function)")
+        Logger.debug("")
 
         self.showCall(call)
 
         // present lock screen notification
         if UIApplication.shared.applicationState == .active {
-            Logger.debug("\(TAG) skipping notification since app is already active.")
+            Logger.debug("skipping notification since app is already active.")
         } else {
-            notificationsAdapter.presentIncomingCall(call, callerName: callerName)
+            notificationPresenter.presentIncomingCall(call, callerName: callerName)
         }
     }
 
     func reportMissedCall(_ call: SignalCall, callerName: String) {
         AssertIsOnMainThread()
 
-        notificationsAdapter.presentMissedCall(call, callerName: callerName)
+        notificationPresenter.presentMissedCall(call, callerName: callerName)
     }
 
     func answerCall(localId: UUID) {
         AssertIsOnMainThread()
 
         guard let call = self.callService.call else {
-            owsFail("\(self.TAG) in \(#function) No current call.")
+            owsFailDebug("No current call.")
             return
         }
 
         guard call.localId == localId else {
-            owsFail("\(self.TAG) in \(#function) localId does not match current call")
+            owsFailDebug("localId does not match current call")
             return
         }
 
@@ -85,11 +89,11 @@ class NonCallKitCallUIAdaptee: NSObject, CallUIAdaptee {
         AssertIsOnMainThread()
 
         guard call.localId == self.callService.call?.localId else {
-            owsFail("\(self.TAG) in \(#function) localId does not match current call")
+            owsFailDebug("localId does not match current call")
             return
         }
 
-        CallAudioSession.shared.isRTCAudioEnabled = true
+        self.audioSession.isRTCAudioEnabled = true
         self.callService.handleAnswerCall(call)
     }
 
@@ -97,12 +101,12 @@ class NonCallKitCallUIAdaptee: NSObject, CallUIAdaptee {
         AssertIsOnMainThread()
 
         guard let call = self.callService.call else {
-            owsFail("\(self.TAG) in \(#function) No current call.")
+            owsFailDebug("No current call.")
             return
         }
 
         guard call.localId == localId else {
-            owsFail("\(self.TAG) in \(#function) localId does not match current call")
+            owsFailDebug("localId does not match current call")
             return
         }
 
@@ -113,7 +117,7 @@ class NonCallKitCallUIAdaptee: NSObject, CallUIAdaptee {
         AssertIsOnMainThread()
 
         guard call.localId == self.callService.call?.localId else {
-            owsFail("\(self.TAG) in \(#function) localId does not match current call")
+            owsFailDebug("localId does not match current call")
             return
         }
 
@@ -123,7 +127,7 @@ class NonCallKitCallUIAdaptee: NSObject, CallUIAdaptee {
     func recipientAcceptedCall(_ call: SignalCall) {
         AssertIsOnMainThread()
 
-        CallAudioSession.shared.isRTCAudioEnabled = true
+        self.audioSession.isRTCAudioEnabled = true
     }
 
     func localHangupCall(_ call: SignalCall) {
@@ -132,7 +136,7 @@ class NonCallKitCallUIAdaptee: NSObject, CallUIAdaptee {
         // If both parties hang up at the same moment,
         // call might already be nil.
         guard self.callService.call == nil || call.localId == self.callService.call?.localId else {
-            owsFail("\(self.TAG) in \(#function) localId does not match current call")
+            owsFailDebug("localId does not match current call")
             return
         }
 
@@ -142,26 +146,26 @@ class NonCallKitCallUIAdaptee: NSObject, CallUIAdaptee {
     internal func remoteDidHangupCall(_ call: SignalCall) {
         AssertIsOnMainThread()
 
-        Logger.debug("\(TAG) in \(#function) is no-op")
+        Logger.debug("is no-op")
     }
 
     internal func remoteBusy(_ call: SignalCall) {
         AssertIsOnMainThread()
 
-        Logger.debug("\(TAG) in \(#function) is no-op")
+        Logger.debug("is no-op")
     }
 
     internal func failCall(_ call: SignalCall, error: CallError) {
         AssertIsOnMainThread()
 
-        Logger.debug("\(TAG) in \(#function) is no-op")
+        Logger.debug("is no-op")
     }
 
     func setIsMuted(call: SignalCall, isMuted: Bool) {
         AssertIsOnMainThread()
 
         guard call.localId == self.callService.call?.localId else {
-            owsFail("\(self.TAG) in \(#function) localId does not match current call")
+            owsFailDebug("localId does not match current call")
             return
         }
 
@@ -172,7 +176,7 @@ class NonCallKitCallUIAdaptee: NSObject, CallUIAdaptee {
         AssertIsOnMainThread()
 
         guard call.localId == self.callService.call?.localId else {
-            owsFail("\(self.TAG) in \(#function) localId does not match current call")
+            owsFailDebug("localId does not match current call")
             return
         }
 

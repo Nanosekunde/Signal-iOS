@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 import XCTest
@@ -12,39 +12,41 @@ import WebRTC
 class FakePeerConnectionClientDelegate: PeerConnectionClientDelegate {
 
     enum ConnectionState {
-        case connected, failed
+        case connected, disconnected, failed
     }
 
     var connectionState: ConnectionState?
     var localIceCandidates = [RTCIceCandidate]()
-    var dataChannelMessages = [OWSWebRTCProtosData]()
+    var dataChannelMessages = [WebRTCProtoData]()
 
-    internal func peerConnectionClientIceConnected(_ peerconnectionClient: PeerConnectionClient) {
+    func peerConnectionClientIceConnected(_ peerconnectionClient: PeerConnectionClient) {
         connectionState = .connected
     }
 
-    internal func peerConnectionClientIceFailed(_ peerconnectionClient: PeerConnectionClient) {
+    func peerConnectionClientIceDisconnected(_ peerconnectionClient: PeerConnectionClient) {
+        connectionState = .disconnected
+    }
+
+    func peerConnectionClientIceFailed(_ peerconnectionClient: PeerConnectionClient) {
         connectionState = .failed
     }
 
-    internal func peerConnectionClient(_ peerconnectionClient: PeerConnectionClient, addedLocalIceCandidate iceCandidate: RTCIceCandidate) {
+    func peerConnectionClient(_ peerconnectionClient: PeerConnectionClient, addedLocalIceCandidate iceCandidate: RTCIceCandidate) {
         localIceCandidates.append(iceCandidate)
     }
 
-    internal func peerConnectionClient(_ peerconnectionClient: PeerConnectionClient, received dataChannelMessage: OWSWebRTCProtosData) {
+    func peerConnectionClient(_ peerconnectionClient: PeerConnectionClient, received dataChannelMessage: WebRTCProtoData) {
         dataChannelMessages.append(dataChannelMessage)
     }
 
-    internal func peerConnectionClient(_ peerconnectionClient: PeerConnectionClient, didUpdateLocal videoTrack: RTCVideoTrack?) {
-
+    func peerConnectionClient(_ peerconnectionClient: PeerConnectionClient, didUpdateLocalVideoCaptureSession captureSession: AVCaptureSession?) {
     }
 
-    internal func peerConnectionClient(_ peerconnectionClient: PeerConnectionClient, didUpdateRemote videoTrack: RTCVideoTrack?) {
-
+    func peerConnectionClient(_ peerconnectionClient: PeerConnectionClient, didUpdateRemoteVideoTrack videoTrack: RTCVideoTrack?) {
     }
 }
 
-class PeerConnectionClientTest: XCTestCase {
+class PeerConnectionClientTest: SignalBaseTest {
 
     var client: PeerConnectionClient!
     var clientDelegate: FakePeerConnectionClientDelegate!
@@ -113,8 +115,13 @@ class PeerConnectionClientTest: XCTestCase {
     func testDataChannelMessage() {
         XCTAssertEqual(0, clientDelegate.dataChannelMessages.count)
 
-        let hangup = DataChannelMessage.forHangup(callId: 123)
-        let hangupBuffer = RTCDataBuffer(data: hangup.asData(), isBinary: false)
+        let hangupBuilder = WebRTCProtoHangup.builder(id: 123)
+        let hangup = try! hangupBuilder.build()
+
+        let dataBuilder = WebRTCProtoData.builder()
+        dataBuilder.setHangup(hangup)
+        let hangupData = try! dataBuilder.buildSerializedData()
+        let hangupBuffer = RTCDataBuffer(data: hangupData, isBinary: false)
         client.dataChannel(dataChannel, didReceiveMessageWith: hangupBuffer)
 
         waitForPeerConnectionClient()
@@ -122,7 +129,7 @@ class PeerConnectionClientTest: XCTestCase {
         XCTAssertEqual(1, clientDelegate.dataChannelMessages.count)
 
         let dataChannelMessageProto = clientDelegate.dataChannelMessages[0]
-        XCTAssert(dataChannelMessageProto.hasHangup())
+        XCTAssertNotNil(dataChannelMessageProto.hangup)
 
         let hangupProto = dataChannelMessageProto.hangup!
         XCTAssertEqual(123, hangupProto.id)

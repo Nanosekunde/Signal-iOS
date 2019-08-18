@@ -1,12 +1,16 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
-@class OWSSignalServiceProtosSyncMessageSent;
-@class OWSSignalServiceProtosDataMessage;
-@class OWSSignalServiceProtosAttachmentPointer;
+@class MessageSticker;
+@class OWSContact;
+@class OWSLinkPreview;
+@class SSKProtoAttachmentPointer;
+@class SSKProtoDataMessage;
+@class SSKProtoSyncMessageSent;
+@class TSQuotedMessage;
 @class TSThread;
 @class YapDatabaseReadWriteTransaction;
 
@@ -16,22 +20,33 @@ NS_ASSUME_NONNULL_BEGIN
  */
 @interface OWSIncomingSentMessageTranscript : NSObject
 
-- (instancetype)initWithProto:(OWSSignalServiceProtosSyncMessageSent *)sentProto relay:(NSString *)relay;
+- (instancetype)initWithProto:(SSKProtoSyncMessageSent *)sentProto
+                  transaction:(YapDatabaseReadWriteTransaction *)transaction;
 
-@property (nonatomic, readonly) NSString *relay;
-@property (nonatomic, readonly) OWSSignalServiceProtosDataMessage *dataMessage;
 @property (nonatomic, readonly) NSString *recipientId;
 @property (nonatomic, readonly) uint64_t timestamp;
+@property (nonatomic, readonly) uint64_t dataMessageTimestamp;
 @property (nonatomic, readonly) uint64_t expirationStartedAt;
 @property (nonatomic, readonly) uint32_t expirationDuration;
 @property (nonatomic, readonly) BOOL isGroupUpdate;
 @property (nonatomic, readonly) BOOL isExpirationTimerUpdate;
 @property (nonatomic, readonly) BOOL isEndSessionMessage;
-@property (nullable, nonatomic, readonly) NSData *groupId;
+@property (nonatomic, readonly, nullable) NSData *groupId;
 @property (nonatomic, readonly) NSString *body;
-@property (nonatomic, readonly) NSArray<OWSSignalServiceProtosAttachmentPointer *> *attachmentPointerProtos;
+@property (nonatomic, readonly) NSArray<SSKProtoAttachmentPointer *> *attachmentPointerProtos;
+@property (nonatomic, readonly, nullable) TSThread *thread;
+@property (nonatomic, readonly, nullable) TSQuotedMessage *quotedMessage;
+@property (nonatomic, readonly, nullable) OWSContact *contact;
+@property (nonatomic, readonly, nullable) OWSLinkPreview *linkPreview;
+@property (nonatomic, readonly, nullable) MessageSticker *messageSticker;
+@property (nonatomic, readonly) BOOL isRecipientUpdate;
+@property (nonatomic, readonly) BOOL isViewOnceMessage;
+@property (nonatomic, readonly, nullable) NSNumber *requiredProtocolVersion;
 
-- (TSThread *)threadWithTransaction:(YapDatabaseReadWriteTransaction *)transaction;
+// If either nonUdRecipientIds or udRecipientIds is nil,
+// this is either a legacy transcript or it reflects a legacy sync message.
+@property (nonatomic, readonly, nullable) NSArray<NSString *> *nonUdRecipientIds;
+@property (nonatomic, readonly, nullable) NSArray<NSString *> *udRecipientIds;
 
 @end
 

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSError.h"
@@ -11,9 +11,14 @@ NSString *const OWSErrorRecipientIdentifierKey = @"OWSErrorKeyRecipientIdentifie
 
 NSError *OWSErrorWithCodeDescription(OWSErrorCode code, NSString *description)
 {
+    return OWSErrorWithUserInfo(code, @{ NSLocalizedDescriptionKey: description });
+}
+
+NSError *OWSErrorWithUserInfo(OWSErrorCode code, NSDictionary *userInfo)
+{
     return [NSError errorWithDomain:OWSSignalServiceKitErrorDomain
                                code:code
-                           userInfo:@{ NSLocalizedDescriptionKey: description }];
+                           userInfo:userInfo];
 }
 
 NSError *OWSErrorMakeUnableToProcessServerResponseError()
@@ -35,10 +40,11 @@ NSError *OWSErrorMakeNoSuchSignalRecipientError()
             @"ERROR_DESCRIPTION_UNREGISTERED_RECIPIENT", @"Error message when attempting to send message"));
 }
 
-NSError *OWSErrorMakeAssertionError()
+NSError *OWSErrorMakeAssertionError(NSString *description)
 {
-    return OWSErrorWithCodeDescription(OWSErrorCodeFailedToSendOutgoingMessage,
-                                       NSLocalizedString(@"ERROR_DESCRIPTION_UNKNOWN_ERROR", @"Worst case generic error message"));
+    OWSCFailDebug(@"Assertion failed: %@", description);
+    return OWSErrorWithCodeDescription(OWSErrorCodeAssertionFailure,
+        NSLocalizedString(@"ERROR_DESCRIPTION_UNKNOWN_ERROR", @"Worst case generic error message"));
 }
 
 NSError *OWSErrorMakeUntrustedIdentityError(NSString *description, NSString *recipientId)
@@ -53,21 +59,21 @@ NSError *OWSErrorMakeMessageSendDisabledDueToPreKeyUpdateFailuresError()
 {
     return OWSErrorWithCodeDescription(OWSErrorCodeMessageSendDisabledDueToPreKeyUpdateFailures,
         NSLocalizedString(@"ERROR_DESCRIPTION_MESSAGE_SEND_DISABLED_PREKEY_UPDATE_FAILURES",
-            @"Error mesage indicating that message send is disabled due to prekey update failures"));
+            @"Error message indicating that message send is disabled due to prekey update failures"));
 }
 
-NSError *OWSErrorMakeMessageSendFailedToBlockListError()
+NSError *OWSErrorMakeMessageSendFailedDueToBlockListError()
 {
     return OWSErrorWithCodeDescription(OWSErrorCodeMessageSendFailedToBlockList,
         NSLocalizedString(@"ERROR_DESCRIPTION_MESSAGE_SEND_FAILED_DUE_TO_BLOCK_LIST",
-            @"Error mesage indicating that message send failed due to block list"));
+            @"Error message indicating that message send failed due to block list"));
 }
 
 NSError *OWSErrorMakeWriteAttachmentDataError()
 {
     return OWSErrorWithCodeDescription(OWSErrorCodeCouldNotWriteAttachmentData,
         NSLocalizedString(@"ERROR_DESCRIPTION_MESSAGE_SEND_FAILED_DUE_TO_FAILED_ATTACHMENT_WRITE",
-            @"Error mesage indicating that message send failed due to failed attachment write"));
+            @"Error message indicating that message send failed due to failed attachment write"));
 }
 
 NS_ASSUME_NONNULL_END

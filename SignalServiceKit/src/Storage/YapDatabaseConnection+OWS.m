@@ -1,11 +1,11 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "YapDatabaseConnection+OWS.h"
-#import <Curve25519Kit/Curve25519.h>
 #import <AxolotlKit/PreKeyRecord.h>
 #import <AxolotlKit/SignedPrekeyRecord.h>
+#import <Curve25519Kit/Curve25519.h>
 #import <YapDatabase/YapDatabaseTransaction.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -14,16 +14,16 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (BOOL)hasObjectForKey:(NSString *)key inCollection:(NSString *)collection
 {
-    OWSAssert(key.length > 0);
-    OWSAssert(collection.length > 0);
+    OWSAssertDebug(key.length > 0);
+    OWSAssertDebug(collection.length > 0);
 
     return nil != [self objectForKey:key inCollection:collection];
 }
 
 - (nullable id)objectForKey:(NSString *)key inCollection:(NSString *)collection
 {
-    OWSAssert(key.length > 0);
-    OWSAssert(collection.length > 0);
+    OWSAssertDebug(key.length > 0);
+    OWSAssertDebug(collection.length > 0);
 
     __block NSString *_Nullable object;
 
@@ -34,13 +34,14 @@ NS_ASSUME_NONNULL_BEGIN
     return object;
 }
 
-- (nullable id)objectForKey:(NSString *)key inCollection:(NSString *)collection ofExpectedType:(Class) class {
+- (nullable id)objectForKey:(NSString *)key inCollection:(NSString *)collection ofExpectedType:(Class)class
+{
     id _Nullable value = [self objectForKey:key inCollection:collection];
-    OWSAssert(!value || [value isKindOfClass:class]);
+    OWSAssertDebug(!value || [value isKindOfClass:class]);
     return value;
 }
 
-    - (nullable NSDictionary *)dictionaryForKey : (NSString *)key inCollection : (NSString *)collection
+- (nullable NSDictionary *)dictionaryForKey:(NSString *)key inCollection:(NSString *)collection
 {
     return [self objectForKey:key inCollection:collection ofExpectedType:[NSDictionary class]];
 }
@@ -50,15 +51,16 @@ NS_ASSUME_NONNULL_BEGIN
     return [self objectForKey:key inCollection:collection ofExpectedType:[NSString class]];
 }
 
-- (BOOL)boolForKey:(NSString *)key inCollection:(NSString *)collection
-{
-    return [self boolForKey:key inCollection:collection defaultValue:NO];
-}
-
 - (BOOL)boolForKey:(NSString *)key inCollection:(NSString *)collection defaultValue:(BOOL)defaultValue
 {
     NSNumber *_Nullable value = [self objectForKey:key inCollection:collection ofExpectedType:[NSNumber class]];
     return value ? [value boolValue] : defaultValue;
+}
+
+- (double)doubleForKey:(NSString *)key inCollection:(NSString *)collection defaultValue:(double)defaultValue
+{
+    NSNumber *_Nullable value = [self objectForKey:key inCollection:collection ofExpectedType:[NSNumber class]];
+    return value ? [value doubleValue] : defaultValue;
 }
 
 - (nullable NSData *)dataForKey:(NSString *)key inCollection:(NSString *)collection
@@ -74,11 +76,6 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable PreKeyRecord *)preKeyRecordForKey:(NSString *)key inCollection:(NSString *)collection
 {
     return [self objectForKey:key inCollection:collection ofExpectedType:[PreKeyRecord class]];
-}
-
-- (nullable SignedPreKeyRecord *)signedPreKeyRecordForKey:(NSString *)key inCollection:(NSString *)collection
-{
-    return [self objectForKey:key inCollection:collection ofExpectedType:[SignedPreKeyRecord class]];
 }
 
 - (int)intForKey:(NSString *)key inCollection:(NSString *)collection
@@ -117,9 +114,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)setObject:(id)object forKey:(NSString *)key inCollection:(NSString *)collection
 {
-    OWSAssert(object);
-    OWSAssert(key.length > 0);
-    OWSAssert(collection.length > 0);
+    OWSAssertDebug(key.length > 0);
+    OWSAssertDebug(collection.length > 0);
 
     [self readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
         [transaction setObject:object forKey:key inCollection:collection];
@@ -128,16 +124,30 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)setBool:(BOOL)value forKey:(NSString *)key inCollection:(NSString *)collection
 {
-    OWSAssert(key.length > 0);
-    OWSAssert(collection.length > 0);
+    OWSAssertDebug(key.length > 0);
+    OWSAssertDebug(collection.length > 0);
+
+    NSNumber *_Nullable oldValue = [self objectForKey:key inCollection:collection ofExpectedType:[NSNumber class]];
+    if (oldValue && [@(value) isEqual:oldValue]) {
+        // Skip redundant writes.
+        return;
+    }
+
+    [self setObject:@(value) forKey:key inCollection:collection];
+}
+
+- (void)setDouble:(double)value forKey:(NSString *)key inCollection:(NSString *)collection
+{
+    OWSAssertDebug(key.length > 0);
+    OWSAssertDebug(collection.length > 0);
 
     [self setObject:@(value) forKey:key inCollection:collection];
 }
 
 - (void)removeObjectForKey:(NSString *)key inCollection:(NSString *)collection
 {
-    OWSAssert(key.length > 0);
-    OWSAssert(collection.length > 0);
+    OWSAssertDebug(key.length > 0);
+    OWSAssertDebug(collection.length > 0);
 
     [self readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
         [transaction removeObjectForKey:key inCollection:collection];
@@ -146,21 +156,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)setInt:(int)value forKey:(NSString *)key inCollection:(NSString *)collection
 {
-    OWSAssert(key.length > 0);
-    OWSAssert(collection.length > 0);
+    OWSAssertDebug(key.length > 0);
+    OWSAssertDebug(collection.length > 0);
 
     [self setObject:@(value) forKey:key inCollection:collection];
-}
-
-- (int)incrementIntForKey:(NSString *)key inCollection:(NSString *)collection
-{
-    __block int value = 0;
-    [self readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-        value = [[transaction objectForKey:key inCollection:collection] intValue];
-        value++;
-        [transaction setObject:@(value) forKey:key inCollection:collection];
-    }];
-    return value;
 }
 
 - (void)setDate:(NSDate *)value forKey:(NSString *)key inCollection:(NSString *)collection

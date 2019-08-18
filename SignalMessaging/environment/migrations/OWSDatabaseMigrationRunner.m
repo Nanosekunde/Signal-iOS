@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSDatabaseMigrationRunner.h"
@@ -8,6 +8,9 @@
 #import "OWS103EnableVideoCalling.h"
 #import "OWS104CreateRecipientIdentities.h"
 #import "OWS105AttachmentFilePaths.h"
+#import "OWS107LegacySounds.h"
+#import "OWS108CallLoggingPreference.h"
+#import "OWS109OutgoingMessageState.h"
 #import "OWSDatabaseMigration.h"
 #import <SignalMessaging/SignalMessaging-Swift.h>
 #import <SignalServiceKit/AppContext.h>
@@ -16,75 +19,117 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSDatabaseMigrationRunner
 
-- (instancetype)initWithStorageManager:(TSStorageManager *)storageManager
+#pragma mark - Dependencies
+
+- (OWSPrimaryStorage *)primaryStorage
 {
-    self = [super init];
-    if (!self) {
-        return self;
-    }
+    OWSAssertDebug(SSKEnvironment.shared.primaryStorage);
 
-    _storageManager = storageManager;
-
-    return self;
+    return SSKEnvironment.shared.primaryStorage;
 }
+
+#pragma mark -
 
 // This should all migrations which do NOT qualify as safeBlockingMigrations:
 - (NSArray<OWSDatabaseMigration *> *)allMigrations
 {
-    TSStorageManager *storageManager = TSStorageManager.sharedManager;
-    return @[
-        [[OWS100RemoveTSRecipientsMigration alloc] initWithStorageManager:storageManager],
-        [[OWS102MoveLoggingPreferenceToUserDefaults alloc] initWithStorageManager:storageManager],
-        [[OWS103EnableVideoCalling alloc] initWithStorageManager:storageManager],
-        // OWS104CreateRecipientIdentities is run separately. See runSafeBlockingMigrations.
-        [[OWS105AttachmentFilePaths alloc] initWithStorageManager:storageManager],
-        [[OWS106EnsureProfileComplete alloc] initWithStorageManager:storageManager]
+    NSArray<OWSDatabaseMigration *> *prodMigrations = @[
+        [[OWS100RemoveTSRecipientsMigration alloc] init],
+        [[OWS102MoveLoggingPreferenceToUserDefaults alloc] init],
+        [[OWS103EnableVideoCalling alloc] init],
+        [[OWS104CreateRecipientIdentities alloc] init],
+        [[OWS105AttachmentFilePaths alloc] init],
+        [[OWS106EnsureProfileComplete alloc] init],
+        [[OWS107LegacySounds alloc] init],
+        [[OWS108CallLoggingPreference alloc] init],
+        [[OWS109OutgoingMessageState alloc] init],
+        [OWS110SortIdMigration new],
+        [[OWS111UDAttributesMigration alloc] init],
+        [[OWS112TypingIndicatorsMigration alloc] init],
+        [[OWS113MultiAttachmentMediaMessages alloc] init],
+        [[OWS114RemoveDynamicInteractions alloc] init]
     ];
-}
 
-// This should only include migrations which:
-//
-// a) Do read/write database transactions and therefore would block on the async database
-//    view registration.
-// b) Will not affect any of the data used by the async database views.
-- (NSArray<OWSDatabaseMigration *> *)safeBlockingMigrations
-{
-    TSStorageManager *storageManager = TSStorageManager.sharedManager;
-    return @[
-        [[OWS104CreateRecipientIdentities alloc] initWithStorageManager:storageManager],
-    ];
+    if (SSKFeatureFlags.useGRDB) {
+        return [prodMigrations arrayByAddingObjectsFromArray:@ [[OWS115GRDBMigration new]]];
+    } else {
+        return prodMigrations;
+    }
 }
 
 - (void)assumeAllExistingMigrationsRun
 {
     for (OWSDatabaseMigration *migration in self.allMigrations) {
-        DDLogInfo(@"%@ Skipping migration on new install: %@", self.logTag, migration);
+        OWSLogInfo(@"Skipping migration on new install: %@", migration);
         [migration save];
     }
 }
 
-- (void)runSafeBlockingMigrations
+- (void)runAllOutstandingWithCompletion:(OWSDatabaseMigrationCompletion)completion
 {
-    [self runMigrations:self.safeBlockingMigrations];
+    [self removeUnknownMigrations];
+
+    [self runMigrations:[self.allMigrations mutableCopy] completion:completion];
 }
 
-- (void)runAllOutstanding
+// Some users (especially internal users) will move back and forth between
+// app versions.  Whenever they move "forward" in the version history, we
+// want them to re-run any new migrations. Therefore, when they move "backward"
+// in the version history, we cull any unknown migrations.
+- (void)removeUnknownMigrations
 {
-    [self runMigrations:self.allMigrations];
-}
-
-- (void)runMigrations:(NSArray<OWSDatabaseMigration *> *)migrations
-{
-    OWSAssert(migrations);
-
-    for (OWSDatabaseMigration *migration in migrations) {
-        if ([OWSDatabaseMigration fetchObjectWithUniqueID:migration.uniqueId]) {
-            DDLogDebug(@"%@ Skipping previously run migration: %@", self.logTag, migration);
-        } else {
-            DDLogWarn(@"%@ Running migration: %@", self.logTag, migration);
-            [migration runUp];
-        }
+    NSMutableSet<NSString *> *knownMigrationIds = [NSMutableSet new];
+    for (OWSDatabaseMigration *migration in self.allMigrations) {
+        [knownMigrationIds addObject:migration.uniqueId];
     }
+
+    [self.primaryStorage.dbReadWriteConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+        NSArray<NSString *> *savedMigrationIds = [transaction allKeysInCollection:OWSDatabaseMigration.collection];
+
+        NSMutableSet<NSString *> *unknownMigrationIds = [NSMutableSet new];
+        [unknownMigrationIds addObjectsFromArray:savedMigrationIds];
+        [unknownMigrationIds minusSet:knownMigrationIds];
+
+        for (NSString *unknownMigrationId in unknownMigrationIds) {
+            OWSLogInfo(@"Culling unknown migration: %@", unknownMigrationId);
+            [transaction removeObjectForKey:unknownMigrationId inCollection:OWSDatabaseMigration.collection];
+        }
+    }];
+}
+
+// Run migrations serially to:
+//
+// * Ensure predictable ordering.
+// * Prevent them from interfering with each other (e.g. deadlock).
+- (void)runMigrations:(NSMutableArray<OWSDatabaseMigration *> *)migrations
+           completion:(OWSDatabaseMigrationCompletion)completion
+{
+    OWSAssertDebug(migrations);
+    OWSAssertDebug(completion);
+
+    // If there are no more migrations to run, complete.
+    if (migrations.count < 1) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion();
+        });
+        return;
+    }
+
+    // Pop next migration from front of queue.
+    OWSDatabaseMigration *migration = migrations.firstObject;
+    [migrations removeObjectAtIndex:0];
+
+    // If migration has already been run, skip it.
+    if ([OWSDatabaseMigration fetchObjectWithUniqueID:migration.uniqueId] != nil) {
+        [self runMigrations:migrations completion:completion];
+        return;
+    }
+
+    OWSLogInfo(@"Running migration: %@", migration);
+    [migration runUpWithCompletion:^{
+        OWSLogInfo(@"Migration complete: %@", migration);
+        [self runMigrations:migrations completion:completion];
+    }];
 }
 
 @end

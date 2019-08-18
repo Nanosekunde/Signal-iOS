@@ -1,18 +1,20 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSMath.h"
 #import "UIColor+OWS.h"
-#import <SignalServiceKit/Cryptography.h>
+#import "OWSMath.h"
+#import <SignalCoreKit/Cryptography.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @implementation UIColor (OWS)
 
+#pragma mark -
+
 + (UIColor *)ows_signalBrandBlueColor
 {
-    return [UIColor colorWithRed:0.1135657504 green:0.4787300229 blue:0.89595204589999999 alpha:1.];
+    return [UIColor colorWithRed:0.1135657504f green:0.4787300229f blue:0.89595204589999999f alpha:1.];
 }
 
 + (UIColor *)ows_materialBlueColor
@@ -21,10 +23,9 @@ NS_ASSUME_NONNULL_BEGIN
     return [UIColor colorWithRed:32.f / 255.f green:144.f / 255.f blue:234.f / 255.f alpha:1.f];
 }
 
-+ (UIColor *)ows_blackColor
++ (UIColor *)ows_darkIconColor
 {
-    // black: #080A00
-    return [UIColor colorWithRed:8.f / 255.f green:10.f / 255.f blue:0. / 255.f alpha:1.f];
+    return [UIColor colorWithRGBHex:0x505050];
 }
 
 + (UIColor *)ows_darkGrayColor
@@ -32,7 +33,7 @@ NS_ASSUME_NONNULL_BEGIN
     return [UIColor colorWithRed:81.f / 255.f green:81.f / 255.f blue:81.f / 255.f alpha:1.f];
 }
 
-+ (UIColor *)ows_darkBackgroundColor
++ (UIColor *)ows_darkThemeBackgroundColor
 {
     return [UIColor colorWithRed:35.f / 255.f green:31.f / 255.f blue:32.f / 255.f alpha:1.f];
 }
@@ -59,21 +60,9 @@ NS_ASSUME_NONNULL_BEGIN
     return [UIColor colorWithRGBHex:0xFCDA91];
 }
 
-+ (UIColor *)ows_greenColor
-{
-    // green: #BF4240
-    return [UIColor colorWithRed:66.f / 255.f green:191.f / 255.f blue:64.f / 255.f alpha:1.f];
-}
-
-+ (UIColor *)ows_redColor
-{
-    // red: #FF3867
-    return [UIColor colorWithRed:255. / 255.f green:56.f / 255.f blue:103.f / 255.f alpha:1.f];
-}
-
 + (UIColor *)ows_destructiveRedColor
 {
-    return [UIColor colorWithRed:0.98639106750488281 green:0.10408364236354828 blue:0.33135244250297546 alpha:1.f];
+    return [UIColor colorWithRGBHex:0xF44336];
 }
 
 + (UIColor *)ows_errorMessageBorderColor
@@ -84,11 +73,6 @@ NS_ASSUME_NONNULL_BEGIN
 + (UIColor *)ows_infoMessageBorderColor
 {
     return [UIColor colorWithRed:239.f / 255.f green:189.f / 255.f blue:88.f / 255.f alpha:1.0f];
-}
-
-+ (UIColor *)ows_inputToolbarBackgroundColor
-{
-    return [self colorWithWhite:245 / 255.f alpha:1.f];
 }
 
 + (UIColor *)ows_lightBackgroundColor
@@ -106,38 +90,9 @@ NS_ASSUME_NONNULL_BEGIN
     return sharedColor;
 }
 
-+ (UIColor *)backgroundColorForContact:(NSString *)contactIdentifier
++ (UIColor *)ows_messageBubbleLightGrayColor
 {
-    NSArray *colors = @[
-        [UIColor colorWithRed:204.f / 255.f green:148.f / 255.f blue:102.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:187.f / 255.f green:104.f / 255.f blue:62.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:145.f / 255.f green:78.f / 255.f blue:48.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:122.f / 255.f green:63.f / 255.f blue:41.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:80.f / 255.f green:46.f / 255.f blue:27.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:57.f / 255.f green:45.f / 255.f blue:19.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:37.f / 255.f green:38.f / 255.f blue:13.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:23.f / 255.f green:31.f / 255.f blue:10.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:6.f / 255.f green:19.f / 255.f blue:10.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:13.f / 255.f green:4.f / 255.f blue:16.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:27.f / 255.f green:12.f / 255.f blue:44.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:18.f / 255.f green:17.f / 255.f blue:64.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:20.f / 255.f green:42.f / 255.f blue:77.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:18.f / 255.f green:55.f / 255.f blue:68.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:18.f / 255.f green:68.f / 255.f blue:61.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:19.f / 255.f green:73.f / 255.f blue:26.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:13.f / 255.f green:48.f / 255.f blue:15.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:44.f / 255.f green:165.f / 255.f blue:137.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:137.f / 255.f green:181.f / 255.f blue:48.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:208.f / 255.f green:204.f / 255.f blue:78.f / 255.f alpha:1.f],
-        [UIColor colorWithRed:227.f / 255.f green:162.f / 255.f blue:150.f / 255.f alpha:1.f]
-    ];
-    NSData *contactData = [contactIdentifier dataUsingEncoding:NSUTF8StringEncoding];
-
-    NSUInteger hashingLength = 8;
-    unsigned long long choose;
-    NSData *hashData = [Cryptography computeSHA256Digest:contactData truncatedToBytes:hashingLength];
-    [hashData getBytes:&choose length:hashingLength];
-    return [colors objectAtIndex:(choose % [colors count])];
+    return [UIColor colorWithHue:240.0f / 360.0f saturation:0.02f brightness:0.92f alpha:1.0f];
 }
 
 + (UIColor *)colorWithRGBHex:(unsigned long)value
@@ -155,19 +110,111 @@ NS_ASSUME_NONNULL_BEGIN
     BOOL result =
 #endif
         [self getRed:&r0 green:&g0 blue:&b0 alpha:&a0];
-    OWSAssert(result);
+    OWSAssertDebug(result);
 
     CGFloat r1, g1, b1, a1;
 #ifdef DEBUG
     result =
 #endif
         [otherColor getRed:&r1 green:&g1 blue:&b1 alpha:&a1];
-    OWSAssert(result);
+    OWSAssertDebug(result);
 
+    alpha = CGFloatClamp01(alpha);
     return [UIColor colorWithRed:CGFloatLerp(r0, r1, alpha)
                            green:CGFloatLerp(g0, g1, alpha)
                             blue:CGFloatLerp(b0, b1, alpha)
                            alpha:CGFloatLerp(a0, a1, alpha)];
+}
+
+#pragma mark - Color Palette
+
++ (UIColor *)ows_signalBlueColor
+{
+    return [UIColor colorWithRGBHex:0x2090EA];
+}
+
++ (UIColor *)ows_greenColor
+{
+    return [UIColor colorWithRGBHex:0x4caf50];
+}
+
++ (UIColor *)ows_redColor
+{
+    return [UIColor colorWithRGBHex:0xf44336];
+}
+
+#pragma mark - GreyScale
+
++ (UIColor *)ows_whiteColor
+{
+    return [UIColor colorWithRGBHex:0xFFFFFF];
+}
+
++ (UIColor *)ows_gray02Color
+{
+    return [UIColor colorWithRGBHex:0xF8F9F9];
+}
+
++ (UIColor *)ows_gray05Color
+{
+    return [UIColor colorWithRGBHex:0xEEEFEF];
+}
+
++ (UIColor *)ows_gray10Color
+{
+    return [UIColor colorWithRGBHex:0xE1E2E3];
+}
+
++ (UIColor *)ows_gray15Color
+{
+    return [UIColor colorWithRGBHex:0xD5D6D6];
+}
+
++ (UIColor *)ows_gray25Color
+{
+    return [UIColor colorWithRGBHex:0xBBBDBE];
+}
+
++ (UIColor *)ows_gray45Color
+{
+    return [UIColor colorWithRGBHex:0x898A8C];
+}
+
++ (UIColor *)ows_gray60Color
+{
+    return [UIColor colorWithRGBHex:0x6B6D70];
+}
+
++ (UIColor *)ows_gray75Color
+{
+    return [UIColor colorWithRGBHex:0x3D3E44];
+}
+
++ (UIColor *)ows_gray85Color
+{
+    return [UIColor colorWithRGBHex:0x23252A];
+}
+
++ (UIColor *)ows_gray90Color
+{
+    return [UIColor colorWithRGBHex:0x17191D];
+}
+
++ (UIColor *)ows_gray95Color
+{
+    return [UIColor colorWithRGBHex:0x0F1012];
+}
+
++ (UIColor *)ows_blackColor
+{
+    return [UIColor colorWithRGBHex:0x000000];
+}
+
+// TODO: Remove
++ (UIColor *)ows_darkSkyBlueColor
+{
+    // HEX 0xc2090EA
+    return [UIColor colorWithRed:32.f / 255.f green:144.f / 255.f blue:234.f / 255.f alpha:1.f];
 }
 
 @end

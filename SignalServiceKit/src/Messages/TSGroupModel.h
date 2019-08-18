@@ -1,23 +1,31 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSYapDatabaseObject.h"
 #import "ContactsManagerProtocol.h"
+#import <Mantle/MTLModel+NSCoding.h>
 
-@interface TSGroupModel : TSYapDatabaseObject
+NS_ASSUME_NONNULL_BEGIN
 
-@property (nonatomic, strong) NSArray<NSString *> *groupMemberIds;
-@property (nonatomic, strong) NSString *groupName;
-@property (nonatomic, strong) NSData *groupId;
+extern const int32_t kGroupIdLength;
+
+@interface TSGroupModel : MTLModel
+
+@property (nonatomic) NSArray<NSString *> *groupMemberIds;
+@property (nullable, readonly, nonatomic) NSString *groupName;
+@property (readonly, nonatomic) NSData *groupId;
 
 #if TARGET_OS_IOS
-@property (nonatomic, strong) UIImage *groupImage;
+@property (nullable, nonatomic, strong) UIImage *groupImage;
 
-- (instancetype)initWithTitle:(NSString *)title
-                    memberIds:(NSMutableArray<NSString *> *)memberIds
-                        image:(UIImage *)image
+- (instancetype)initWithTitle:(nullable NSString *)title
+                    memberIds:(NSArray<NSString *> *)memberIds
+                        image:(nullable UIImage *)image
                       groupId:(NSData *)groupId;
+
+- (instancetype)initWithGroupId:(NSData *)groupId
+                 groupMemberIds:(NSArray<NSString *> *)groupMemberIds
+                      groupName:(nullable NSString *)groupName;
 
 - (BOOL)isEqual:(id)other;
 - (BOOL)isEqualToGroupModel:(TSGroupModel *)model;
@@ -25,3 +33,5 @@
 #endif
 
 @end
+
+NS_ASSUME_NONNULL_END

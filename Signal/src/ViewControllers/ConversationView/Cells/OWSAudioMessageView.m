@@ -1,27 +1,29 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSAudioMessageView.h"
 #import "ConversationViewItem.h"
 #import "Signal-Swift.h"
-#import "UIColor+JSQMessages.h"
 #import "UIColor+OWS.h"
 #import "ViewControllerUtils.h"
 #import <SignalMessaging/OWSFormat.h>
+#import <SignalMessaging/UIColor+OWS.h>
 #import <SignalServiceKit/MIMETypeUtil.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @interface OWSAudioMessageView ()
 
-@property (nonatomic) TSAttachmentStream *attachmentStream;
+@property (nonatomic) TSAttachment *attachment;
+@property (nonatomic, nullable) TSAttachmentStream *attachmentStream;
 @property (nonatomic) BOOL isIncoming;
-@property (nonatomic, weak) ConversationViewItem *viewItem;
+@property (nonatomic, weak) id<ConversationViewItem> viewItem;
+@property (nonatomic, readonly) ConversationStyle *conversationStyle;
 
 @property (nonatomic, nullable) UIButton *audioPlayPauseButton;
-@property (nonatomic, nullable) UILabel *audioBottomLabel;
-@property (nonatomic, nullable) AudioProgressView *audioProgressView;
+@property (nonatomic, nullable) UILabel *playbackTimeLabel;
+@property (nonatomic, nullable) UISlider *audioProgressSlider;
 
 @end
 
@@ -29,16 +31,21 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSAudioMessageView
 
-- (instancetype)initWithAttachment:(TSAttachmentStream *)attachmentStream
+- (instancetype)initWithAttachment:(TSAttachment *)attachment
                         isIncoming:(BOOL)isIncoming
-                          viewItem:(ConversationViewItem *)viewItem
+                          viewItem:(id<ConversationViewItem>)viewItem
+                 conversationStyle:(ConversationStyle *)conversationStyle
 {
     self = [super init];
 
     if (self) {
-        _attachmentStream = attachmentStream;
+        _attachment = attachment;
+        if ([attachment isKindOfClass:[TSAttachmentStream class]]) {
+            _attachmentStream = (TSAttachmentStream *)attachment;
+        }
         _isIncoming = isIncoming;
         _viewItem = viewItem;
+        _conversationStyle = conversationStyle;
     }
 
     return self;
@@ -46,13 +53,16 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)updateContents
 {
-    [self updateAudioProgressView];
-    [self updateAudioBottomLabel];
-
     if (self.audioPlaybackState == AudioPlaybackState_Playing) {
         [self setAudioIconToPause];
     } else {
         [self setAudioIconToPlay];
+    }
+
+    // Don't update the position if we're current scrubbing, as it conflicts with the user interaction.
+    if (!self.isScrubbing) {
+        [self updateAudioProgressSlider];
+        [self updateAudioBottomLabel:self.audioProgressSeconds];
     }
 }
 
@@ -63,8 +73,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (CGFloat)audioDurationSeconds
 {
-    OWSAssert(self.viewItem.audioDurationSeconds > 0.f);
-
     return self.viewItem.audioDurationSeconds;
 }
 
@@ -78,78 +86,140 @@ NS_ASSUME_NONNULL_BEGIN
     return self.audioPlaybackState == AudioPlaybackState_Playing;
 }
 
-- (void)updateAudioBottomLabel
+- (void)updateAudioBottomLabel:(CGFloat)progressSeconds
 {
-    if (self.isAudioPlaying && self.audioProgressSeconds > 0 && self.audioDurationSeconds > 0) {
-        self.audioBottomLabel.text =
-            [NSString stringWithFormat:@"%@ / %@",
-                      [OWSFormat formatDurationSeconds:(long)round(self.audioProgressSeconds)],
-                      [OWSFormat formatDurationSeconds:(long)round(self.audioDurationSeconds)]];
-    } else {
-        self.audioBottomLabel.text =
-            [NSString stringWithFormat:@"%@", [OWSFormat formatDurationSeconds:(long)round(self.audioDurationSeconds)]];
-    }
+    self.playbackTimeLabel.text =
+        [OWSFormat formatDurationSeconds:(long)round(self.audioDurationSeconds - progressSeconds)];
 }
 
-- (void)setAudioIcon:(UIImage *)icon iconColor:(UIColor *)iconColor
+- (void)setAudioIcon:(UIImage *)icon
 {
+    OWSAssertDebug(icon.size.height == self.iconSize);
+
     icon = [icon imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
     [_audioPlayPauseButton setImage:icon forState:UIControlStateNormal];
     [_audioPlayPauseButton setImage:icon forState:UIControlStateDisabled];
-    _audioPlayPauseButton.imageView.tintColor = self.bubbleBackgroundColor;
-    _audioPlayPauseButton.backgroundColor = iconColor;
-    _audioPlayPauseButton.layer.cornerRadius
-        = MIN(_audioPlayPauseButton.bounds.size.width, _audioPlayPauseButton.bounds.size.height) * 0.5f;
 }
 
 - (void)setAudioIconToPlay
 {
-    [self setAudioIcon:[UIImage imageNamed:@"audio_play_black_40"]
-             iconColor:(self.isIncoming ? [UIColor colorWithRGBHex:0x9e9e9e] : [self audioColorWithOpacity:0.15f])];
+    [self setAudioIcon:[UIImage imageNamed:@"play-filled-24"]];
 }
 
 - (void)setAudioIconToPause
 {
-    [self setAudioIcon:[UIImage imageNamed:@"audio_pause_black_40"]
-             iconColor:(self.isIncoming ? [UIColor colorWithRGBHex:0x9e9e9e] : [self audioColorWithOpacity:0.15f])];
+    [self setAudioIcon:[UIImage imageNamed:@"pause-filled-24"]];
 }
 
-- (void)updateAudioProgressView
+- (void)updateAudioProgressSlider
 {
-    [self.audioProgressView
-        setProgress:(self.audioDurationSeconds > 0 ? self.audioProgressSeconds / self.audioDurationSeconds : 0.f)];
+    float progressRatio = 0;
+    if (self.audioDurationSeconds > 0) {
+        progressRatio = (float)(self.audioProgressSeconds / self.audioDurationSeconds);
+    }
+    [self.audioProgressSlider setValue:progressRatio];
 
-    self.audioProgressView.horizontalBarColor = [self audioColorWithOpacity:0.75f];
-    self.audioProgressView.progressColor
-        = (self.isAudioPlaying ? [self audioColorWithOpacity:self.isIncoming ? 0.2f : 0.1f]
-                               : [self audioColorWithOpacity:0.4f]);
+
+    UIColor *minimumTrackColor = nil;
+    UIColor *maximumTrackColor = nil;
+    UIColor *thumbColor = nil;
+
+    if (self.isIncoming) {
+        minimumTrackColor = [UIColor colorWithRGBHex:0x92caff];
+        maximumTrackColor = [[Theme secondaryColor] colorWithAlphaComponent:0.3];
+        thumbColor = [Theme secondaryColor];
+    } else {
+        minimumTrackColor = [UIColor ows_whiteColor];
+        maximumTrackColor = [[UIColor ows_whiteColor] colorWithAlphaComponent:0.6];
+        thumbColor = [UIColor ows_whiteColor];
+    }
+
+    [self.audioProgressSlider setMaximumTrackImage:[self trackImageWithColor:maximumTrackColor]
+                                          forState:UIControlStateNormal];
+    [self.audioProgressSlider setMinimumTrackImage:[self trackImageWithColor:minimumTrackColor]
+                                          forState:UIControlStateNormal];
+
+    [self.audioProgressSlider
+        setThumbImage:[[UIImage imageNamed:@"audio_message_thumb"] asTintedImageWithColor:thumbColor]
+             forState:UIControlStateNormal];
+
+    self.audioPlayPauseButton.imageView.tintColor = thumbColor;
 }
 
-#pragma mark - JSQMessageMediaData protocol
-
-- (CGFloat)audioIconHMargin
+- (UIImage *)trackImageWithColor:(UIColor *)color
 {
-    return 12.f;
+    return [[[UIImage imageNamed:@"audio_message_track"] asTintedImageWithColor:color]
+        resizableImageWithCapInsets:UIEdgeInsetsMake(0, 2, 0, 2)];
 }
 
-- (CGFloat)audioIconHSpacing
+- (void)replaceIconWithDownloadProgressIfNecessary:(UIView *)iconView
 {
-    return 10.f;
+    if (!self.viewItem.attachmentPointer) {
+        return;
+    }
+
+    switch (self.viewItem.attachmentPointer.state) {
+        case TSAttachmentPointerStateFailed:
+            // We don't need to handle the "tap to retry" state here,
+            // only download progress.
+            return;
+        case TSAttachmentPointerStateEnqueued:
+        case TSAttachmentPointerStateDownloading:
+            break;
+    }
+    switch (self.viewItem.attachmentPointer.pointerType) {
+        case TSAttachmentPointerTypeRestoring:
+            // TODO: Show "restoring" indicator and possibly progress.
+            return;
+        case TSAttachmentPointerTypeUnknown:
+        case TSAttachmentPointerTypeIncoming:
+            break;
+    }
+    NSString *_Nullable uniqueId = self.viewItem.attachmentPointer.uniqueId;
+    if (uniqueId.length < 1) {
+        OWSFailDebug(@"Missing uniqueId.");
+        return;
+    }
+
+    CGFloat downloadViewSize = self.iconSize;
+    MediaDownloadView *downloadView =
+        [[MediaDownloadView alloc] initWithAttachmentId:uniqueId radius:downloadViewSize * 0.5f];
+    iconView.layer.opacity = 0.01f;
+    [self addSubview:downloadView];
+    [downloadView autoSetDimensionsToSize:CGSizeMake(downloadViewSize, downloadViewSize)];
+    [downloadView autoAlignAxis:ALAxisHorizontal toSameAxisOfView:iconView];
+    [downloadView autoAlignAxis:ALAxisVertical toSameAxisOfView:iconView];
 }
 
-+ (CGFloat)audioIconVMargin
+#pragma mark -
+
+- (CGFloat)hMargin
 {
-    return 12.f;
+    return 8.f;
 }
 
-- (CGFloat)audioIconVMargin
+- (CGFloat)hSpacing
 {
-    return [OWSAudioMessageView audioIconVMargin];
+    return 15.f;
+}
+
++ (CGFloat)vMargin
+{
+    return 4.f;
+}
+
+- (CGFloat)vMargin
+{
+    return [OWSAudioMessageView vMargin];
 }
 
 + (CGFloat)bubbleHeight
 {
-    return self.iconSize + self.audioIconVMargin * 2;
+    CGFloat iconHeight = self.iconSize;
+    CGFloat labelsHeight = ([OWSAudioMessageView labelFont].lineHeight * 2 +
+        [OWSAudioMessageView audioProgressSliderHeight] + [OWSAudioMessageView labelVSpacing] * 2);
+    CGFloat contentHeight = MAX(iconHeight, labelsHeight);
+    return contentHeight + self.vMargin * 2;
 }
 
 - (CGFloat)bubbleHeight
@@ -159,7 +229,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (CGFloat)iconSize
 {
-    return 40.f;
+    return 24;
 }
 
 - (CGFloat)iconSize
@@ -167,71 +237,33 @@ NS_ASSUME_NONNULL_BEGIN
     return [OWSAudioMessageView iconSize];
 }
 
-- (UIColor *)audioTextColor
-{
-    return (self.isIncoming ? [UIColor colorWithWhite:0.2f alpha:1.f] : [UIColor whiteColor]);
-}
-
-- (UIColor *)audioColorWithOpacity:(CGFloat)alpha
-{
-    return [self.audioTextColor blendWithColor:self.bubbleBackgroundColor alpha:alpha];
-}
-
-- (UIColor *)bubbleBackgroundColor
-{
-    return self.isIncoming ? [UIColor jsq_messageBubbleLightGrayColor] : [UIColor ows_materialBlueColor];
-}
-
 - (BOOL)isVoiceMessage
 {
-    // We want to treat "pre-voice messages flag" messages as voice messages if
-    // they have no file name.
-    //
-    // TODO: Remove this after the flag has been in production for a few months.
-    return (self.attachmentStream.isVoiceMessage || self.attachmentStream.sourceFilename.length < 1);
+    return self.attachment.isVoiceMessage;
 }
 
 - (void)createContents
 {
-    UIColor *textColor = [self audioTextColor];
-
-    self.backgroundColor = self.bubbleBackgroundColor;
-    self.layoutMargins = UIEdgeInsetsZero;
-
-    // TODO: Verify that this layout works in RTL.
-    const CGFloat kBubbleTailWidth = 6.f;
-
-    UIView *contentView = [UIView containerView];
-    [self addSubview:contentView];
-    [contentView autoPinLeadingToSuperviewWithMargin:self.isIncoming ? kBubbleTailWidth : 0.f];
-    [contentView autoPinTrailingToSuperviewWithMargin:self.isIncoming ? 0.f : kBubbleTailWidth];
-    [contentView autoPinEdgeToSuperviewEdge:ALEdgeTop withInset:self.audioIconVMargin];
-    [contentView autoPinEdgeToSuperviewEdge:ALEdgeBottom withInset:self.audioIconVMargin];
+    self.axis = UILayoutConstraintAxisHorizontal;
+    self.alignment = UIStackViewAlignmentCenter;
+    self.spacing = self.hSpacing;
+    self.layoutMarginsRelativeArrangement = YES;
+    self.layoutMargins = UIEdgeInsetsMake(self.vMargin, self.hMargin, self.vMargin, self.hMargin);
 
     _audioPlayPauseButton = [UIButton buttonWithType:UIButtonTypeCustom];
     self.audioPlayPauseButton.enabled = NO;
-    [contentView addSubview:self.audioPlayPauseButton];
-    [self.audioPlayPauseButton autoPinLeadingToSuperviewWithMargin:self.audioIconHMargin];
-    [self.audioPlayPauseButton autoVCenterInSuperview];
-    [self.audioPlayPauseButton autoSetDimension:ALDimensionWidth toSize:self.iconSize];
-    [self.audioPlayPauseButton autoSetDimension:ALDimensionHeight toSize:self.iconSize];
+    [self addArrangedSubview:self.audioPlayPauseButton];
+    [self.audioPlayPauseButton setContentHuggingHigh];
 
-    const CGFloat kLabelHSpacing = self.audioIconHSpacing;
+    [self replaceIconWithDownloadProgressIfNecessary:self.audioPlayPauseButton];
 
-    UIView *labelsView = [UIView containerView];
-    [contentView addSubview:labelsView];
-    [labelsView autoPinLeadingToTrailingOfView:self.audioPlayPauseButton margin:kLabelHSpacing];
-    [labelsView autoPinTrailingToSuperviewWithMargin:self.audioIconHMargin];
-    [labelsView autoVCenterInSuperview];
-
-    const CGFloat kLabelVSpacing = 2;
-    NSString *filename = self.attachmentStream.sourceFilename;
-    if (!filename) {
-        filename = [[self.attachmentStream filePath] lastPathComponent];
+    NSString *_Nullable filename = self.attachment.sourceFilename;
+    if (filename.length < 1) {
+        filename = [self.attachmentStream.originalFilePath lastPathComponent];
     }
     NSString *topText = [[filename stringByDeletingPathExtension] ows_stripped];
     if (topText.length < 1) {
-        topText = [MIMETypeUtil fileExtensionForMIMEType:self.attachmentStream.contentType].uppercaseString;
+        topText = [MIMETypeUtil fileExtensionForMIMEType:self.attachment.contentType].localizedUppercaseString;
     }
     if (topText.length < 1) {
         topText = NSLocalizedString(@"GENERIC_ATTACHMENT_LABEL", @"A label for generic attachments.");
@@ -241,34 +273,88 @@ NS_ASSUME_NONNULL_BEGIN
     }
     UILabel *topLabel = [UILabel new];
     topLabel.text = topText;
-    topLabel.textColor = [textColor colorWithAlphaComponent:0.85f];
+    topLabel.textColor = [self.conversationStyle bubbleTextColorWithIsIncoming:self.isIncoming];
     topLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    topLabel.font = [UIFont ows_regularFontWithSize:ScaleFromIPhone5To7Plus(11.f, 13.f)];
-    [labelsView addSubview:topLabel];
-    [topLabel autoPinEdgeToSuperviewEdge:ALEdgeTop];
-    [topLabel autoPinWidthToSuperview];
+    topLabel.font = [OWSAudioMessageView labelFont];
 
-    const CGFloat kAudioProgressViewHeight = 12.f;
-    AudioProgressView *audioProgressView = [AudioProgressView new];
-    self.audioProgressView = audioProgressView;
-    [self updateAudioProgressView];
-    [labelsView addSubview:audioProgressView];
-    [audioProgressView autoPinWidthToSuperview];
-    [audioProgressView autoSetDimension:ALDimensionHeight toSize:kAudioProgressViewHeight];
-    [audioProgressView autoPinEdge:ALEdgeTop toEdge:ALEdgeBottom ofView:topLabel withOffset:kLabelVSpacing];
+    UISlider *audioProgressSlider = [UISlider new];
+    self.audioProgressSlider = audioProgressSlider;
+    [self updateAudioProgressSlider];
+    [audioProgressSlider autoSetDimension:ALDimensionHeight toSize:[OWSAudioMessageView audioProgressSliderHeight]];
 
-    UILabel *bottomLabel = [UILabel new];
-    self.audioBottomLabel = bottomLabel;
-    [self updateAudioBottomLabel];
-    bottomLabel.textColor = [textColor colorWithAlphaComponent:0.85f];
-    bottomLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    bottomLabel.font = [UIFont ows_regularFontWithSize:ScaleFromIPhone5To7Plus(11.f, 13.f)];
-    [labelsView addSubview:bottomLabel];
-    [bottomLabel autoPinWidthToSuperview];
-    [bottomLabel autoPinEdge:ALEdgeTop toEdge:ALEdgeBottom ofView:audioProgressView withOffset:kLabelVSpacing];
-    [bottomLabel autoPinEdgeToSuperviewEdge:ALEdgeBottom];
+    UIStackView *labelsView = [UIStackView new];
+    labelsView.axis = UILayoutConstraintAxisVertical;
+    labelsView.spacing = [OWSAudioMessageView labelVSpacing];
+    [labelsView addArrangedSubview:topLabel];
+    [labelsView addArrangedSubview:audioProgressSlider];
+
+    // Ensure the "audio progress" and "play button" are v-center-aligned using a container.
+    UIView *labelsContainerView = [UIView containerView];
+    [self addArrangedSubview:labelsContainerView];
+    [labelsContainerView addSubview:labelsView];
+    [labelsView autoPinWidthToSuperview];
+    [labelsView autoPinEdgeToSuperviewMargin:ALEdgeTop relation:NSLayoutRelationGreaterThanOrEqual];
+    [labelsView autoPinEdgeToSuperviewMargin:ALEdgeBottom relation:NSLayoutRelationGreaterThanOrEqual];
+
+    [audioProgressSlider autoAlignAxis:ALAxisHorizontal toSameAxisOfView:self.audioPlayPauseButton];
+
+    UILabel *playbackTimeLabel = [UILabel new];
+    self.playbackTimeLabel = playbackTimeLabel;
+    [self updateAudioBottomLabel:self.audioProgressSeconds];
+    playbackTimeLabel.textColor = [self.conversationStyle bubbleSecondaryTextColorWithIsIncoming:self.isIncoming];
+    playbackTimeLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    playbackTimeLabel.font = [OWSAudioMessageView progressLabelFont];
+    [self addArrangedSubview:playbackTimeLabel];
+    [playbackTimeLabel setContentHuggingHigh];
 
     [self updateContents];
+}
+
++ (CGFloat)audioProgressSliderHeight
+{
+    return 12.f;
+}
+
++ (UIFont *)labelFont
+{
+    return [UIFont ows_dynamicTypeCaption2Font];
+}
+
++ (UIFont *)progressLabelFont
+{
+    return [[UIFont ows_dynamicTypeCaption1Font] ows_monospaced];
+}
+
++ (CGFloat)labelVSpacing
+{
+    return 2.f;
+}
+
+- (BOOL)isPointInScrubbableRegion:(CGPoint)location
+{
+    CGPoint locationInSlider = [self convertPoint:location toView:self.audioProgressSlider];
+    return locationInSlider.x >= 0 && locationInSlider.x <= self.audioProgressSlider.width;
+}
+
+- (NSTimeInterval)scrubToLocation:(CGPoint)location
+{
+    CGRect sliderContainer = [self convertRect:self.audioProgressSlider.frame
+                                      fromView:self.audioProgressSlider.superview];
+
+    CGFloat newRatio = CGFloatClamp01(CGFloatInverseLerp(location.x, CGRectGetMinX(sliderContainer), CGRectGetMaxX(sliderContainer)));
+
+    // When in RTL mode, the slider moves in the opposite direction so inverse the ratio.
+    if (CurrentAppContext().isRTL) {
+        newRatio = 1 - newRatio;
+    }
+
+    [self.audioProgressSlider setValue:(float)newRatio];
+
+    CGFloat newProgressSeconds = newRatio * self.audioDurationSeconds;
+
+    [self updateAudioBottomLabel:newProgressSeconds];
+
+    return newProgressSeconds;
 }
 
 @end

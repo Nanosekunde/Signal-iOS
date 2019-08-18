@@ -1,25 +1,29 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSDevice.h"
-#import "NSDate+OWS.h"
 #import "OWSError.h"
-#import "TSStorageManager.h"
+#import "OWSPrimaryStorage.h"
+#import "ProfileManagerProtocol.h"
+#import "SSKEnvironment.h"
+#import "TSAccountManager.h"
 #import "YapDatabaseConnection+OWS.h"
 #import "YapDatabaseConnection.h"
 #import "YapDatabaseTransaction.h"
 #import <Mantle/MTLValueTransformer.h>
+#import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalServiceKit/OWSIdentityManager.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 uint32_t const OWSDevicePrimaryDeviceId = 1;
-NSString *const kTSStorageManager_OWSDeviceCollection = @"kTSStorageManager_OWSDeviceCollection";
-NSString *const kTSStorageManager_MayHaveLinkedDevices = @"kTSStorageManager_MayHaveLinkedDevices";
+NSString *const kOWSPrimaryStorage_OWSDeviceCollection = @"kTSStorageManager_OWSDeviceCollection";
+NSString *const kOWSPrimaryStorage_MayHaveLinkedDevices = @"kTSStorageManager_MayHaveLinkedDevices";
 
 @interface OWSDeviceManager ()
 
-@property (atomic, nullable) NSNumber *mayHaveLinkedDevicesCached;
 @property (atomic) NSDate *lastReceivedSyncMessage;
 
 @end
@@ -45,34 +49,40 @@ NSString *const kTSStorageManager_MayHaveLinkedDevices = @"kTSStorageManager_May
 
 - (BOOL)mayHaveLinkedDevices:(YapDatabaseConnection *)dbConnection
 {
-    OWSAssert(dbConnection);
+    OWSAssertDebug(dbConnection);
 
-    @synchronized(self)
-    {
-        if (!self.mayHaveLinkedDevicesCached) {
-            self.mayHaveLinkedDevicesCached = @([dbConnection boolForKey:kTSStorageManager_MayHaveLinkedDevices
-                                                            inCollection:kTSStorageManager_OWSDeviceCollection
-                                                            defaultValue:YES]);
-        }
-
-        return [self.mayHaveLinkedDevicesCached boolValue];
-    }
+    return [dbConnection boolForKey:kOWSPrimaryStorage_MayHaveLinkedDevices
+                       inCollection:kOWSPrimaryStorage_OWSDeviceCollection
+                       defaultValue:YES];
 }
 
-- (void)setMayHaveLinkedDevices:(BOOL)value dbConnection:(YapDatabaseConnection *)dbConnection
+// In order to avoid skipping necessary sync messages, the default value
+// for mayHaveLinkedDevices is YES.  Once we've successfully sent a
+// sync message with no device messages (e.g. the service has confirmed
+// that we have no linked devices), we can set mayHaveLinkedDevices to NO
+// to avoid unnecessary message sends for sync messages until we learn
+// of a linked device (e.g. through the device linking UI or by receiving
+// a sync message, etc.).
+- (void)clearMayHaveLinkedDevices
 {
-    OWSAssert(dbConnection);
-
-    @synchronized(self)
-    {
-        self.mayHaveLinkedDevicesCached = @(value);
-
-        [dbConnection asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
-            [transaction setObject:@(value)
-                            forKey:kTSStorageManager_MayHaveLinkedDevices
-                      inCollection:kTSStorageManager_OWSDeviceCollection];
+    // Note that we write async to avoid opening transactions within transactions.
+    [OWSPrimaryStorage.sharedManager.newDatabaseConnection
+        asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
+            [transaction setObject:@(NO)
+                            forKey:kOWSPrimaryStorage_MayHaveLinkedDevices
+                      inCollection:kOWSPrimaryStorage_OWSDeviceCollection];
         }];
-    }
+}
+
+- (void)setMayHaveLinkedDevices
+{
+    // Note that we write async to avoid opening transactions within transactions.
+    [OWSPrimaryStorage.sharedManager.newDatabaseConnection
+        asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
+            [transaction setObject:@(YES)
+                            forKey:kOWSPrimaryStorage_MayHaveLinkedDevices
+                      inCollection:kOWSPrimaryStorage_OWSDeviceCollection];
+        }];
 }
 
 - (BOOL)hasReceivedSyncMessageInLastSeconds:(NSTimeInterval)intervalSeconds
@@ -83,6 +93,8 @@ NSString *const kTSStorageManager_MayHaveLinkedDevices = @"kTSStorageManager_May
 - (void)setHasReceivedSyncMessage
 {
     self.lastReceivedSyncMessage = [NSDate new];
+
+    [self setMayHaveLinkedDevices];
 }
 
 @end
@@ -102,9 +114,77 @@ NSString *const kTSStorageManager_MayHaveLinkedDevices = @"kTSStorageManager_May
 
 @implementation OWSDevice
 
-+ (instancetype)deviceFromJSONDictionary:(NSDictionary *)deviceAttributes error:(NSError **)error
+#pragma mark - Dependencies
+
++ (id<ProfileManagerProtocol>)profileManager
 {
-    return [MTLJSONAdapter modelOfClass:[self class] fromJSONDictionary:deviceAttributes error:error];
+    return SSKEnvironment.shared.profileManager;
+}
+
++ (id<OWSUDManager>)udManager
+{
+    return SSKEnvironment.shared.udManager;
+}
+
++ (TSAccountManager *)tsAccountManager
+{
+    return TSAccountManager.sharedInstance;
+}
+
+- (OWSIdentityManager *)identityManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.identityManager);
+
+    return SSKEnvironment.shared.identityManager;
+}
+
+#pragma mark -
+
+// --- CODE GENERATION MARKER
+
+// This snippet is generated by /Scripts/sds_codegen/sds_generate.py. Do not manually edit it, instead run
+// `sds_codegen.sh`.
+
+// clang-format off
+
+- (instancetype)initWithUniqueId:(NSString *)uniqueId
+                       createdAt:(NSDate *)createdAt
+                        deviceId:(NSInteger)deviceId
+                      lastSeenAt:(NSDate *)lastSeenAt
+                            name:(nullable NSString *)name
+{
+    self = [super initWithUniqueId:uniqueId];
+
+    if (!self) {
+        return self;
+    }
+
+    _createdAt = createdAt;
+    _deviceId = deviceId;
+    _lastSeenAt = lastSeenAt;
+    _name = name;
+
+    return self;
+}
+
+// clang-format on
+
+// --- CODE GENERATION MARKER
+
+- (void)saveWithTransaction:(YapDatabaseReadWriteTransaction *)transaction
+{
+    [super saveWithTransaction:transaction];
+}
+
++ (nullable instancetype)deviceFromJSONDictionary:(NSDictionary *)deviceAttributes error:(NSError **)error
+{
+    OWSDevice *device = [MTLJSONAdapter modelOfClass:[self class] fromJSONDictionary:deviceAttributes error:error];
+    if (device.deviceId < OWSDevicePrimaryDeviceId) {
+        OWSFailDebug(@"Invalid device id: %lu", (unsigned long)device.deviceId);
+        *error = OWSErrorWithCodeDescription(OWSErrorCodeFailedToDecodeJson, @"Invalid device id.");
+        return nil;
+    }
+    return device;
 }
 
 + (NSDictionary *)JSONKeyPathsByPropertyKey
@@ -127,14 +207,33 @@ NSString *const kTSStorageManager_MayHaveLinkedDevices = @"kTSStorageManager_May
     return self.millisecondTimestampToDateTransformer;
 }
 
-+ (void)replaceAll:(NSArray<OWSDevice *> *)currentDevices
++ (NSArray<OWSDevice *> *)currentDevicesWithTransaction:(YapDatabaseReadTransaction *)transaction
 {
+    OWSAssertDebug(transaction);
+
+    NSMutableArray<OWSDevice *> *result = [NSMutableArray new];
+    [transaction enumerateKeysAndObjectsInCollection:OWSDevice.collection
+                                          usingBlock:^(NSString *key, OWSDevice *object, BOOL *stop) {
+                                              if (![object isKindOfClass:[OWSDevice class]]) {
+                                                  OWSFailDebug(@"Unexpected object in collection: %@", object.class);
+                                                  return;
+                                              }
+                                              [result addObject:object];
+                                          }];
+    return result;
+}
+
++ (BOOL)replaceAll:(NSArray<OWSDevice *> *)currentDevices
+{
+    BOOL didAddOrRemove = NO;
     NSMutableArray<OWSDevice *> *existingDevices = [[self allObjectsInCollection] mutableCopy];
     for (OWSDevice *currentDevice in currentDevices) {
         NSUInteger existingDeviceIndex = [existingDevices indexOfObject:currentDevice];
         if (existingDeviceIndex == NSNotFound) {
             // New Device
+            OWSLogInfo(@"Adding device: %@", currentDevice);
             [currentDevice save];
+            didAddOrRemove = YES;
         } else {
             OWSDevice *existingDevice = existingDevices[existingDeviceIndex];
             if ([existingDevice updateAttributesWithDevice:currentDevice]) {
@@ -146,7 +245,20 @@ NSString *const kTSStorageManager_MayHaveLinkedDevices = @"kTSStorageManager_May
 
     // Since we removed existing devices as we went, only stale devices remain
     for (OWSDevice *staleDevice in existingDevices) {
+        OWSLogVerbose(@"Removing device: %@", staleDevice);
         [staleDevice remove];
+        didAddOrRemove = YES;
+    }
+
+    if (didAddOrRemove) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // Device changes can affect the UD access mode for a recipient,
+            // so we need to fetch the profile for this user to update UD access mode.
+            [self.profileManager fetchLocalUsersProfile];
+        });
+        return YES;
+    } else {
+        return NO;
     }
 }
 
@@ -165,8 +277,8 @@ NSString *const kTSStorageManager_MayHaveLinkedDevices = @"kTSStorageManager_May
                 }
             }
             *success = NO;
-            DDLogError(@"%@ unable to decode date from %@", self.logTag, value);
-            *error = OWSErrorWithCodeDescription(OWSErrorCodeFailedToDecodeJson, @"Unable to decode date from %@");
+            OWSLogError(@"unable to decode date from %@", value);
+            *error = OWSErrorWithCodeDescription(OWSErrorCodeFailedToDecodeJson, @"Unable to decode date from JSON.");
             return nil;
         }
             reverseBlock:^id(id value, BOOL *success, NSError **error) {
@@ -178,8 +290,8 @@ NSString *const kTSStorageManager_MayHaveLinkedDevices = @"kTSStorageManager_May
                         return result;
                     }
                 }
-                DDLogError(@"%@ unable to encode date from %@", self.logTag, value);
-                *error = OWSErrorWithCodeDescription(OWSErrorCodeFailedToEncodeJson, @"Unable to encode date");
+                OWSLogError(@"unable to encode date from %@", value);
+                *error = OWSErrorWithCodeDescription(OWSErrorCodeFailedToEncodeJson, @"Unable to encode date to JSON.");
                 *success = NO;
                 return nil;
             }];
@@ -202,6 +314,20 @@ NSString *const kTSStorageManager_MayHaveLinkedDevices = @"kTSStorageManager_May
 - (NSString *)displayName
 {
     if (self.name) {
+        ECKeyPair *_Nullable identityKeyPair = self.identityManager.identityKeyPair;
+        OWSAssertDebug(identityKeyPair);
+        if (identityKeyPair) {
+            NSError *error;
+            NSString *_Nullable decryptedName =
+                [DeviceNames decryptDeviceNameWithBase64String:self.name identityKeyPair:identityKeyPair error:&error];
+            if (error) {
+                // Not necessarily an error; might be a legacy device name.
+                OWSLogError(@"Could not decrypt device name: %@", error);
+            } else if (decryptedName) {
+                return decryptedName;
+            }
+        }
+
         return self.name;
     }
 

@@ -1,133 +1,201 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "TSMessage.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
+// Feature flag.
+//
+// TODO: Remove.
+BOOL AreRecipientUpdatesEnabled(void);
+
 typedef NS_ENUM(NSInteger, TSOutgoingMessageState) {
     // The message is either:
     // a) Enqueued for sending.
     // b) Waiting on attachment upload(s).
     // c) Being sent to the service.
-    TSOutgoingMessageStateAttemptingOut,
+    TSOutgoingMessageStateSending,
     // The failure state.
-    TSOutgoingMessageStateUnsent,
-    // These two enum values have been combined into TSOutgoingMessageStateSentToService.
+    TSOutgoingMessageStateFailed,
+    // These two enum values have been combined into TSOutgoingMessageStateSent.
     TSOutgoingMessageStateSent_OBSOLETE,
     TSOutgoingMessageStateDelivered_OBSOLETE,
     // The message has been sent to the service.
-    TSOutgoingMessageStateSentToService,
+    TSOutgoingMessageStateSent,
 };
+
+NSString *NSStringForOutgoingMessageState(TSOutgoingMessageState value);
+
+typedef NS_ENUM(NSInteger, OWSOutgoingMessageRecipientState) {
+    // Message could not be sent to recipient.
+    OWSOutgoingMessageRecipientStateFailed = 0,
+    // Message is being sent to the recipient (enqueued, uploading or sending).
+    OWSOutgoingMessageRecipientStateSending,
+    // The message was not sent because the recipient is not valid.
+    // For example, this recipient may have left the group.
+    OWSOutgoingMessageRecipientStateSkipped,
+    // The message has been sent to the service.  It may also have been delivered or read.
+    OWSOutgoingMessageRecipientStateSent,
+
+    OWSOutgoingMessageRecipientStateMin = OWSOutgoingMessageRecipientStateFailed,
+    OWSOutgoingMessageRecipientStateMax = OWSOutgoingMessageRecipientStateSent,
+};
+
+NSString *NSStringForOutgoingMessageRecipientState(OWSOutgoingMessageRecipientState value);
 
 typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
-    TSGroupMessageNone,
-    TSGroupMessageNew,
-    TSGroupMessageUpdate,
-    TSGroupMessageDeliver,
-    TSGroupMessageQuit,
-    TSGroupMessageRequestInfo,
+    TSGroupMetaMessageUnspecified,
+    TSGroupMetaMessageNew,
+    TSGroupMetaMessageUpdate,
+    TSGroupMetaMessageDeliver,
+    TSGroupMetaMessageQuit,
+    TSGroupMetaMessageRequestInfo,
 };
 
-@class OWSSignalServiceProtosAttachmentPointer;
-@class OWSSignalServiceProtosContentBuilder;
-@class OWSSignalServiceProtosDataMessageBuilder;
+@class SDSAnyWriteTransaction;
+@class SSKProtoAttachmentPointer;
+@class SSKProtoContentBuilder;
+@class SSKProtoDataMessageBuilder;
 @class SignalRecipient;
+
+@interface TSOutgoingMessageRecipientState : MTLModel
+
+@property (atomic, readonly) OWSOutgoingMessageRecipientState state;
+// This property should only be set if state == .sent.
+@property (atomic, nullable, readonly) NSNumber *deliveryTimestamp;
+// This property should only be set if state == .sent.
+@property (atomic, nullable, readonly) NSNumber *readTimestamp;
+
+@property (atomic, readonly) BOOL wasSentByUD;
+
+@end
+
+#pragma mark -
 
 @interface TSOutgoingMessage : TSMessage
 
-- (instancetype)initWithTimestamp:(uint64_t)timestamp;
+- (instancetype)initMessageWithTimestamp:(uint64_t)timestamp
+                                inThread:(nullable TSThread *)thread
+                             messageBody:(nullable NSString *)body
+                           attachmentIds:(NSArray<NSString *> *)attachmentIds
+                        expiresInSeconds:(uint32_t)expiresInSeconds
+                         expireStartedAt:(uint64_t)expireStartedAt
+                           quotedMessage:(nullable TSQuotedMessage *)quotedMessage
+                            contactShare:(nullable OWSContact *)contactShare
+                             linkPreview:(nullable OWSLinkPreview *)linkPreview
+                          messageSticker:(nullable MessageSticker *)messageSticker NS_UNAVAILABLE;
 
-- (instancetype)initWithTimestamp:(uint64_t)timestamp inThread:(nullable TSThread *)thread;
+// MJK TODO - Can we remove the sender timestamp param?
+- (instancetype)initOutgoingMessageWithTimestamp:(uint64_t)timestamp
+                                        inThread:(nullable TSThread *)thread
+                                     messageBody:(nullable NSString *)body
+                                   attachmentIds:(NSMutableArray<NSString *> *)attachmentIds
+                                expiresInSeconds:(uint32_t)expiresInSeconds
+                                 expireStartedAt:(uint64_t)expireStartedAt
+                                  isVoiceMessage:(BOOL)isVoiceMessage
+                                groupMetaMessage:(TSGroupMetaMessage)groupMetaMessage
+                                   quotedMessage:(nullable TSQuotedMessage *)quotedMessage
+                                    contactShare:(nullable OWSContact *)contactShare
+                                     linkPreview:(nullable OWSLinkPreview *)linkPreview
+                                  messageSticker:(nullable MessageSticker *)messageSticker
+                               isViewOnceMessage:(BOOL)isViewOnceMessage NS_DESIGNATED_INITIALIZER;
 
-- (instancetype)initWithTimestamp:(uint64_t)timestamp
-                         inThread:(nullable TSThread *)thread
-                      messageBody:(nullable NSString *)body;
+// --- CODE GENERATION MARKER
 
-- (instancetype)initWithTimestamp:(uint64_t)timestamp
-                         inThread:(nullable TSThread *)thread
-                 groupMetaMessage:(TSGroupMetaMessage)groupMetaMessage;
+// This snippet is generated by /Scripts/sds_codegen/sds_generate.py. Do not manually edit it, instead run `sds_codegen.sh`.
 
-- (instancetype)initWithTimestamp:(uint64_t)timestamp
-                         inThread:(nullable TSThread *)thread
-                      messageBody:(nullable NSString *)body
-                    attachmentIds:(NSMutableArray<NSString *> *)attachmentIds;
+// clang-format off
 
-- (instancetype)initWithTimestamp:(uint64_t)timestamp
-                         inThread:(nullable TSThread *)thread
-                      messageBody:(nullable NSString *)body
-                    attachmentIds:(NSMutableArray<NSString *> *)attachmentIds
-                 expiresInSeconds:(uint32_t)expiresInSeconds;
+- (instancetype)initWithUniqueId:(NSString *)uniqueId
+             receivedAtTimestamp:(uint64_t)receivedAtTimestamp
+                          sortId:(uint64_t)sortId
+                       timestamp:(uint64_t)timestamp
+                  uniqueThreadId:(NSString *)uniqueThreadId
+                   attachmentIds:(NSArray<NSString *> *)attachmentIds
+                            body:(nullable NSString *)body
+                    contactShare:(nullable OWSContact *)contactShare
+                 expireStartedAt:(uint64_t)expireStartedAt
+                       expiresAt:(uint64_t)expiresAt
+                expiresInSeconds:(unsigned int)expiresInSeconds
+              isViewOnceComplete:(BOOL)isViewOnceComplete
+               isViewOnceMessage:(BOOL)isViewOnceMessage
+                     linkPreview:(nullable OWSLinkPreview *)linkPreview
+                  messageSticker:(nullable MessageSticker *)messageSticker
+                   quotedMessage:(nullable TSQuotedMessage *)quotedMessage
+                   schemaVersion:(NSUInteger)schemaVersion
+           attachmentFilenameMap:(NSDictionary<NSString *,NSString *> *)attachmentFilenameMap
+                   customMessage:(nullable NSString *)customMessage
+                groupMetaMessage:(TSGroupMetaMessage)groupMetaMessage
+           hasLegacyMessageState:(BOOL)hasLegacyMessageState
+             hasSyncedTranscript:(BOOL)hasSyncedTranscript
+              isFromLinkedDevice:(BOOL)isFromLinkedDevice
+                  isVoiceMessage:(BOOL)isVoiceMessage
+              legacyMessageState:(TSOutgoingMessageState)legacyMessageState
+              legacyWasDelivered:(BOOL)legacyWasDelivered
+           mostRecentFailureText:(nullable NSString *)mostRecentFailureText
+               recipientStateMap:(nullable NSDictionary<NSString *,TSOutgoingMessageRecipientState *> *)recipientStateMap
+NS_SWIFT_NAME(init(uniqueId:receivedAtTimestamp:sortId:timestamp:uniqueThreadId:attachmentIds:body:contactShare:expireStartedAt:expiresAt:expiresInSeconds:isViewOnceComplete:isViewOnceMessage:linkPreview:messageSticker:quotedMessage:schemaVersion:attachmentFilenameMap:customMessage:groupMetaMessage:hasLegacyMessageState:hasSyncedTranscript:isFromLinkedDevice:isVoiceMessage:legacyMessageState:legacyWasDelivered:mostRecentFailureText:recipientStateMap:));
 
-- (instancetype)initWithTimestamp:(uint64_t)timestamp
-                         inThread:(nullable TSThread *)thread
-                      messageBody:(nullable NSString *)messageBody
-                   isVoiceMessage:(BOOL)isVoiceMessage
-                 expiresInSeconds:(uint32_t)expiresInSeconds;
+// clang-format on
 
-- (instancetype)initWithTimestamp:(uint64_t)timestamp
-                         inThread:(nullable TSThread *)thread
-                      messageBody:(nullable NSString *)body
-                    attachmentIds:(NSMutableArray<NSString *> *)attachmentIds
-                 expiresInSeconds:(uint32_t)expiresInSeconds
-                  expireStartedAt:(uint64_t)expireStartedAt;
+// --- CODE GENERATION MARKER
 
-- (instancetype)initWithTimestamp:(uint64_t)timestamp
-                         inThread:(nullable TSThread *)thread
-                      messageBody:(nullable NSString *)body
-                    attachmentIds:(NSMutableArray<NSString *> *)attachmentIds
-                 expiresInSeconds:(uint32_t)expiresInSeconds
-                  expireStartedAt:(uint64_t)expireStartedAt
-                 groupMetaMessage:(TSGroupMetaMessage)groupMetaMessage NS_DESIGNATED_INITIALIZER;
+- (nullable instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
 
-- (instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
++ (instancetype)outgoingMessageInThread:(nullable TSThread *)thread
+                            messageBody:(nullable NSString *)body
+                           attachmentId:(nullable NSString *)attachmentId;
 
-@property (atomic, readonly) TSOutgoingMessageState messageState;
++ (instancetype)outgoingMessageInThread:(nullable TSThread *)thread
+                            messageBody:(nullable NSString *)body
+                           attachmentId:(nullable NSString *)attachmentId
+                       expiresInSeconds:(uint32_t)expiresInSeconds;
 
-// The message has been sent to the service and received by at least one recipient client.
-// A recipient may have more than one client, and group message may have more than one recipient.
-@property (atomic, readonly) BOOL wasDelivered;
++ (instancetype)outgoingMessageInThread:(nullable TSThread *)thread
+                            messageBody:(nullable NSString *)body
+                           attachmentId:(nullable NSString *)attachmentId
+                       expiresInSeconds:(uint32_t)expiresInSeconds
+                          quotedMessage:(nullable TSQuotedMessage *)quotedMessage
+                            linkPreview:(nullable OWSLinkPreview *)linkPreview
+                         messageSticker:(nullable MessageSticker *)messageSticker;
+
++ (instancetype)outgoingMessageInThread:(nullable TSThread *)thread
+                       groupMetaMessage:(TSGroupMetaMessage)groupMetaMessage
+                       expiresInSeconds:(uint32_t)expiresInSeconds;
+
+@property (readonly) TSOutgoingMessageState messageState;
+@property (readonly) BOOL wasDeliveredToAnyRecipient;
+@property (readonly) BOOL wasSentToAnyRecipient;
 
 @property (atomic, readonly) BOOL hasSyncedTranscript;
-@property (atomic, readonly) NSString *customMessage;
-@property (atomic, readonly) NSString *mostRecentFailureText;
+@property (atomic, readonly, nullable) NSString *customMessage;
+@property (atomic, readonly, nullable) NSString *mostRecentFailureText;
 // A map of attachment id-to-"source" filename.
 @property (nonatomic, readonly) NSMutableDictionary<NSString *, NSString *> *attachmentFilenameMap;
 
 @property (atomic, readonly) TSGroupMetaMessage groupMetaMessage;
-
-// If set, this group message should only be sent to a single recipient.
-@property (atomic, readonly) NSString *singleGroupRecipient;
 
 @property (nonatomic, readonly) BOOL isVoiceMessage;
 
 // This property won't be accurate for legacy messages.
 @property (atomic, readonly) BOOL isFromLinkedDevice;
 
-// Map of "recipient id"-to-"delivery time" of the recipients who have received the message.
-@property (atomic, readonly) NSDictionary<NSString *, NSNumber *> *recipientDeliveryMap;
-
-// Map of "recipient id"-to-"read time" of the recipients who have read the message.
-@property (atomic, readonly) NSDictionary<NSString *, NSNumber *> *recipientReadMap;
-
 @property (nonatomic, readonly) BOOL isSilent;
 
-/**
- * Signal Identifier (e.g. e164 number) or nil if in a group thread.
- */
-- (nullable NSString *)recipientIdentifier;
+@property (nonatomic, readonly) BOOL isOnline;
 
 /**
  * The data representation of this message, to be encrypted, before being sent.
  */
-- (NSData *)buildPlainTextData:(SignalRecipient *)recipient;
+- (nullable NSData *)buildPlainTextData:(SignalRecipient *)recipient;
 
 /**
  * Intermediate protobuf representation
  * Subclasses can augment if they want to manipulate the data message before building.
  */
-- (OWSSignalServiceProtosDataMessageBuilder *)dataMessageBuilder;
+- (nullable SSKProtoDataMessageBuilder *)dataMessageBuilder;
 
 /**
  * Should this message be synced to the users other registered devices? This is
@@ -136,51 +204,89 @@ typedef NS_ENUM(NSInteger, TSGroupMetaMessage) {
  */
 - (BOOL)shouldSyncTranscript;
 
-/**
- * @param attachmentId
- *   id of an AttachmentStream containing the meta data used when populating the attachment proto
- *
- * @param filename
- *   optional filename of the attachment.
- *
- * @return
- *      An attachment pointer protobuf suitable for including in various container protobuf builders
- */
-- (OWSSignalServiceProtosAttachmentPointer *)buildAttachmentProtoForAttachmentId:(NSString *)attachmentId
-                                                                        filename:(nullable NSString *)filename;
-
 - (BOOL)shouldBeSaved;
+
+// All recipients of this message.
+- (NSArray<NSString *> *)recipientIds;
+
+// All recipients of this message who we are currently trying to send to (queued, uploading or during send).
+- (NSArray<NSString *> *)sendingRecipientIds;
+
+// All recipients of this message to whom it has been sent (and possibly delivered or read).
+- (NSArray<NSString *> *)sentRecipientIds;
+
+// All recipients of this message to whom it has been sent and delivered (and possibly read).
+- (NSArray<NSString *> *)deliveredRecipientIds;
+
+// All recipients of this message to whom it has been sent, delivered and read.
+- (NSArray<NSString *> *)readRecipientIds;
+
+// Number of recipients of this message to whom it has been sent.
+- (NSUInteger)sentRecipientsCount;
+
+- (nullable TSOutgoingMessageRecipientState *)recipientStateForRecipientId:(NSString *)recipientId;
 
 #pragma mark - Update With... Methods
 
-- (void)updateWithMessageState:(TSOutgoingMessageState)messageState;
-- (void)updateWithMessageState:(TSOutgoingMessageState)messageState
-                   transaction:(YapDatabaseReadWriteTransaction *)transaction;
-- (void)updateWithSendingError:(NSError *)error;
+// This method is used to record a successful send to one recipient.
+- (void)updateWithSentRecipient:(NSString *)recipientId
+                    wasSentByUD:(BOOL)wasSentByUD
+                    transaction:(SDSAnyWriteTransaction *)transaction;
+
+// This method is used to record a skipped send to one recipient.
+- (void)updateWithSkippedRecipient:(NSString *)recipientId transaction:(YapDatabaseReadWriteTransaction *)transaction;
+
+// On app launch, all "sending" recipients should be marked as "failed".
+- (void)updateWithAllSendingRecipientsMarkedAsFailedWithTansaction:(YapDatabaseReadWriteTransaction *)transaction;
+
+// When we start a message send, all "failed" recipients should be marked as "sending".
+- (void)updateAllUnsentRecipientsAsSendingWithTransaction:(SDSAnyWriteTransaction *)transaction
+    NS_SWIFT_NAME(updateAllUnsentRecipientsAsSending(transaction:));
+
+// This method is used to forge the message state for fake messages.
+//
+// NOTE: This method should only be used by Debug UI, etc.
+- (void)updateWithFakeMessageState:(TSOutgoingMessageState)messageState
+                       transaction:(SDSAnyWriteTransaction *)transaction;
+
+// This method is used to record a failed send to all "sending" recipients.
+- (void)updateWithSendingError:(NSError *)error
+                   transaction:(SDSAnyWriteTransaction *)transaction NS_SWIFT_NAME(update(sendingError:transaction:));
+
 - (void)updateWithHasSyncedTranscript:(BOOL)hasSyncedTranscript
                           transaction:(YapDatabaseReadWriteTransaction *)transaction;
 - (void)updateWithCustomMessage:(NSString *)customMessage transaction:(YapDatabaseReadWriteTransaction *)transaction;
 - (void)updateWithCustomMessage:(NSString *)customMessage;
+
+// This method is used to record a successful delivery to one recipient.
+//
 // deliveryTimestamp is an optional parameter, since legacy
 // delivery receipts don't have a "delivery timestamp".  Those
 // messages repurpose the "timestamp" field to indicate when the
 // corresponding message was originally sent.
-- (void)updateWithDeliveredToRecipientId:(NSString *)recipientId
-                       deliveryTimestamp:(NSNumber *_Nullable)deliveryTimestamp
-                             transaction:(YapDatabaseReadWriteTransaction *)transaction;
-- (void)updateWithWasSentFromLinkedDeviceWithTransaction:(YapDatabaseReadWriteTransaction *)transaction;
-- (void)updateWithSingleGroupRecipient:(NSString *)singleGroupRecipient
-                           transaction:(YapDatabaseReadWriteTransaction *)transaction;
+- (void)updateWithDeliveredRecipient:(NSString *)recipientId
+                   deliveryTimestamp:(NSNumber *_Nullable)deliveryTimestamp
+                         transaction:(YapDatabaseReadWriteTransaction *)transaction;
+
+- (void)updateWithWasSentFromLinkedDeviceWithUDRecipientIds:(nullable NSArray<NSString *> *)udRecipientIds
+                                          nonUdRecipientIds:(nullable NSArray<NSString *> *)nonUdRecipientIds
+                                               isSentUpdate:(BOOL)isSentUpdate
+                                                transaction:(YapDatabaseReadWriteTransaction *)transaction;
+
+// This method is used to rewrite the recipient list with a single recipient.
+// It is used to reply to a "group info request", which should only be
+// delivered to the requestor.
+- (void)updateWithSendingToSingleGroupRecipient:(NSString *)singleGroupRecipient
+                                    transaction:(YapDatabaseReadWriteTransaction *)transaction;
+
+// This method is used to record a successful "read" by one recipient.
 - (void)updateWithReadRecipientId:(NSString *)recipientId
                     readTimestamp:(uint64_t)readTimestamp
                       transaction:(YapDatabaseReadWriteTransaction *)transaction;
+
 - (nullable NSNumber *)firstRecipientReadTimestamp;
 
-#pragma mark - Sent Recipients
-
-- (NSUInteger)sentRecipientsCount;
-- (BOOL)wasSentToRecipient:(NSString *)contactId;
-- (void)updateWithSentRecipient:(NSString *)contactId transaction:(YapDatabaseReadWriteTransaction *)transaction;
+- (NSString *)statusDescription;
 
 @end
 

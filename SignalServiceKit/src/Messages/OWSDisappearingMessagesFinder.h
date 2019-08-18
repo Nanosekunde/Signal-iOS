@@ -1,10 +1,11 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
-@class TSStorageManager;
+@class OWSPrimaryStorage;
+@class OWSStorage;
 @class TSMessage;
 @class TSThread;
 @class YapDatabaseReadTransaction;
@@ -13,9 +14,13 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)enumerateExpiredMessagesWithBlock:(void (^_Nonnull)(TSMessage *message))block
                               transaction:(YapDatabaseReadTransaction *)transaction;
+
 - (void)enumerateUnstartedExpiringMessagesInThread:(TSThread *)thread
                                              block:(void (^_Nonnull)(TSMessage *message))block
                                        transaction:(YapDatabaseReadTransaction *)transaction;
+
+- (void)enumerateMessagesWhichFailedToStartExpiringWithBlock:(void (^_Nonnull)(TSMessage *message))block
+                                                 transaction:(YapDatabaseReadTransaction *)transaction;
 
 /**
  * @return
@@ -24,15 +29,16 @@ NS_ASSUME_NONNULL_BEGIN
  */
 - (nullable NSNumber *)nextExpirationTimestampWithTransaction:(YapDatabaseReadTransaction *_Nonnull)transaction;
 
-/**
- * Database extensions required for class to work.
- */
-+ (void)asyncRegisterDatabaseExtensions:(TSStorageManager *)storageManager;
++ (NSString *)databaseExtensionName;
 
++ (void)asyncRegisterDatabaseExtensions:(OWSStorage *)storage;
+
+#ifdef DEBUG
 /**
  * Only use the sync version for testing, generally we'll want to register extensions async
  */
-+ (void)blockingRegisterDatabaseExtensions:(TSStorageManager *)storageManager;
++ (void)blockingRegisterDatabaseExtensions:(OWSStorage *)storage;
+#endif
 
 @end
 

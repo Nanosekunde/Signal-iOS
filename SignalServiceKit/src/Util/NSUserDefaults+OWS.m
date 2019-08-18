@@ -1,8 +1,9 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "NSUserDefaults+OWS.h"
+#import "AppContext.h"
 #import "TSConstants.h"
 
 NS_ASSUME_NONNULL_BEGIN
@@ -11,17 +12,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (NSUserDefaults *)appUserDefaults
 {
-    return [[NSUserDefaults alloc] initWithSuiteName:SignalApplicationGroup];
+    return CurrentAppContext().appUserDefaults;
 }
 
 + (void)migrateToSharedUserDefaults
 {
+    OWSLogInfo(@"");
+
     NSUserDefaults *appUserDefaults = self.appUserDefaults;
 
     NSDictionary<NSString *, id> *dictionary = [NSUserDefaults standardUserDefaults].dictionaryRepresentation;
     for (NSString *key in dictionary) {
         id value = dictionary[key];
-        OWSAssert(value);
+        OWSAssertDebug(value);
         [appUserDefaults setObject:value forKey:key];
     }
 }
@@ -34,6 +37,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)removeAll
 {
+    OWSAssertDebug(CurrentAppContext().isMainApp);
+
     NSDictionary<NSString *, id> *dictionary = self.dictionaryRepresentation;
     for (NSString *key in dictionary) {
         [self removeObjectForKey:key];

@@ -1,8 +1,9 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "DebugUITableViewController.h"
+#import "DebugUIBackup.h"
 #import "DebugUIContacts.h"
 #import "DebugUIDiskUsage.h"
 #import "DebugUIMessages.h"
@@ -52,8 +53,8 @@ NS_ASSUME_NONNULL_BEGIN
                      viewController:(DebugUITableViewController *)viewController
                              thread:(nullable TSThread *)thread
 {
-    OWSAssert(page);
-    OWSAssert(viewController);
+    OWSAssertDebug(page);
+    OWSAssertDebug(viewController);
 
     __weak DebugUITableViewController *weakSelf = viewController;
     return [OWSTableItem disclosureItemWithText:page.name
@@ -64,8 +65,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (void)presentDebugUIForThread:(TSThread *)thread fromViewController:(UIViewController *)fromViewController
 {
-    OWSAssert(thread);
-    OWSAssert(fromViewController);
+    OWSAssertDebug(thread);
+    OWSAssertDebug(fromViewController);
 
     DebugUITableViewController *viewController = [DebugUITableViewController new];
 
@@ -73,23 +74,46 @@ NS_ASSUME_NONNULL_BEGIN
     contents.title = @"Debug: Conversation";
 
     NSMutableArray<OWSTableItem *> *subsectionItems = [NSMutableArray new];
+
     [subsectionItems
         addObject:[self itemForSubsection:[DebugUIMessages new] viewController:viewController thread:thread]];
     [subsectionItems
         addObject:[self itemForSubsection:[DebugUIContacts new] viewController:viewController thread:thread]];
     [subsectionItems
         addObject:[self itemForSubsection:[DebugUIDiskUsage new] viewController:viewController thread:thread]];
+    [subsectionItems
+        addObject:[self itemForSubsection:[DebugUISessionState new] viewController:viewController thread:thread]];
     if ([thread isKindOfClass:[TSContactThread class]]) {
-        [subsectionItems
-            addObject:[self itemForSubsection:[DebugUISessionState new] viewController:viewController thread:thread]];
         [subsectionItems
             addObject:[self itemForSubsection:[DebugUICalling new] viewController:viewController thread:thread]];
     }
+    [subsectionItems
+        addObject:[self itemForSubsection:[DebugUINotifications new] viewController:viewController thread:thread]];
     [subsectionItems addObject:[self itemForSubsection:[DebugUIProfile new] viewController:viewController thread:thread]];
     [subsectionItems
         addObject:[self itemForSubsection:[DebugUIStress new] viewController:viewController thread:thread]];
     [subsectionItems
         addObject:[self itemForSubsection:[DebugUISyncMessages new] viewController:viewController thread:thread]];
+    OWSTableItem *sharedDataFileBrowserItem = [OWSTableItem
+        disclosureItemWithText:@"📁 Shared Container"
+                   actionBlock:^{
+                       NSURL *baseURL = [NSURL URLWithString:[OWSFileSystem appSharedDataDirectoryPath]];
+                       DebugUIFileBrowser *fileBrowser = [[DebugUIFileBrowser alloc] initWithFileURL:baseURL];
+                       [viewController.navigationController pushViewController:fileBrowser animated:YES];
+                   }];
+    [subsectionItems addObject:sharedDataFileBrowserItem];
+    OWSTableItem *documentsFileBrowserItem = [OWSTableItem
+        disclosureItemWithText:@"📁 App Container"
+                   actionBlock:^{
+                       NSString *libraryPath = [OWSFileSystem appLibraryDirectoryPath];
+                       NSString *containerPath = [libraryPath stringByDeletingLastPathComponent];
+                       NSURL *baseURL = [NSURL fileURLWithPath:containerPath];
+                       DebugUIFileBrowser *fileBrowser = [[DebugUIFileBrowser alloc] initWithFileURL:baseURL];
+                       [viewController.navigationController pushViewController:fileBrowser animated:YES];
+                   }];
+    [subsectionItems addObject:documentsFileBrowserItem];
+    [subsectionItems
+        addObject:[self itemForSubsection:[DebugUIBackup new] viewController:viewController thread:thread]];
     [subsectionItems addObject:[self itemForSubsection:[DebugUIMisc new] viewController:viewController thread:thread]];
 
     [contents addSection:[OWSTableSection sectionWithTitle:@"Sections" items:subsectionItems]];
@@ -100,7 +124,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (void)presentDebugUIFromViewController:(UIViewController *)fromViewController
 {
-    OWSAssert(fromViewController);
+    OWSAssertDebug(fromViewController);
 
     DebugUITableViewController *viewController = [DebugUITableViewController new];
 
@@ -112,7 +136,10 @@ NS_ASSUME_NONNULL_BEGIN
     [subsectionItems
         addObject:[self itemForSubsection:[DebugUIDiskUsage new] viewController:viewController thread:nil]];
     [subsectionItems
+        addObject:[self itemForSubsection:[DebugUISessionState new] viewController:viewController thread:nil]];
+    [subsectionItems
         addObject:[self itemForSubsection:[DebugUISyncMessages new] viewController:viewController thread:nil]];
+    [subsectionItems addObject:[self itemForSubsection:[DebugUIBackup new] viewController:viewController thread:nil]];
     [subsectionItems addObject:[self itemForSubsection:[DebugUIMisc new] viewController:viewController thread:nil]];
     [contents addSection:[OWSTableSection sectionWithTitle:@"Sections" items:subsectionItems]];
 

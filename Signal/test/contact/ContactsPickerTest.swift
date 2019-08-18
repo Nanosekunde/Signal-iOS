@@ -1,12 +1,12 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import XCTest
 import Contacts
 @testable import Signal
 
-final class ContactsPickerTest: XCTestCase {
+final class ContactsPickerTest: SignalBaseTest {
     private var prevLang: Any?
 
     override func setUp() {
@@ -23,7 +23,6 @@ final class ContactsPickerTest: XCTestCase {
         }
     }
 
-    @available(iOS 9.0, *)
     func testContactSectionMatchesEmailFirstLetterWhenOnlyEmailContact() {
         setLangEN()
 
@@ -33,22 +32,21 @@ final class ContactsPickerTest: XCTestCase {
         let emailOnlyContactD = CNMutableContact()
         emailOnlyContactD.emailAddresses.append(CNLabeledValue(label: nil, value: "dude@bla.com"))
 
-        let contactsPicker = ContactsPicker(delegate: nil)
+        let contactsPicker = ContactsPicker(allowsMultipleSelection: false, subtitleCellType: .phoneNumber)
         let collatedContacts = contactsPicker.collatedContacts([emailOnlyContactB, emailOnlyContactD])
 
-        let sectionTitles = contactsPicker.collation.sectionTitles
-        if let bIndex = sectionTitles.index(of: "B") {
+        let sectionTitles = contactsPicker.collationForTests.sectionTitles
+        if let bIndex = sectionTitles.firstIndex(of: "B") {
             let bSectionContacts = collatedContacts[bIndex]
             XCTAssertEqual(bSectionContacts.first, emailOnlyContactB)
         }
 
-        if let dIndex = sectionTitles.index(of: "D") {
+        if let dIndex = sectionTitles.firstIndex(of: "D") {
             let dSectionContacts = collatedContacts[dIndex]
             XCTAssertEqual(dSectionContacts.first, emailOnlyContactD)
         }
     }
 
-    @available(iOS 9.0, *)
     func testContactSectionMatchesNameFirstLetterWhenNameExistsInContact() {
         setLangEN()
 
@@ -56,11 +54,11 @@ final class ContactsPickerTest: XCTestCase {
         nameAndEmailContact.givenName = "Alice"
         nameAndEmailContact.emailAddresses.append(CNLabeledValue(label: nil, value: "nameAndEmail@bla.com"))
 
-        let contactsPicker = ContactsPicker(delegate: nil)
+        let contactsPicker = ContactsPicker(allowsMultipleSelection: false, subtitleCellType: .phoneNumber)
         let collatedContacts = contactsPicker.collatedContacts([nameAndEmailContact])
 
-        let sectionTitles = contactsPicker.collation.sectionTitles
-        if let aIndex = sectionTitles.index(of: "A") {
+        let sectionTitles = contactsPicker.collationForTests.sectionTitles
+        if let aIndex = sectionTitles.firstIndex(of: "A") {
             let aSectionContacts = collatedContacts[aIndex]
             XCTAssertEqual(aSectionContacts.first, nameAndEmailContact)
         }

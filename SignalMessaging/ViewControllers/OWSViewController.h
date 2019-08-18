@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import <UIKit/UIKit.h>
@@ -10,12 +10,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic) BOOL shouldIgnoreKeyboardChanges;
 
-// We often want to pin one view to the bottom guide
-// of a view controller BUT adjust its location upward
-// if the keyboard appears.
-//
-// Use this method in lieu of autoPinToBottomLayoutGuideOfViewController:
-- (void)autoPinViewToBottomGuideOrKeyboard:(UIView *)view;
+@property (nonatomic) BOOL shouldUseTheme;
+
+// We often want to pin one view to the bottom of a view controller
+// BUT adjust its location upward if the keyboard appears.
+- (void)autoPinViewToBottomOfViewControllerOrKeyboard:(UIView *)view avoidNotch:(BOOL)avoidNotch;
+
+// If YES, the bottom view never "reclaims" layout space if the keyboard is dismissed.
+// Defaults to NO.
+@property (nonatomic) BOOL shouldBottomViewReserveSpaceForKeyboard;
+
+- (instancetype)initWithNibName:(nullable NSString *)nibNameOrNil
+                         bundle:(nullable NSBundle *)nibBundleOrNil NS_DESIGNATED_INITIALIZER;
+- (nullable instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
 
 @end
 

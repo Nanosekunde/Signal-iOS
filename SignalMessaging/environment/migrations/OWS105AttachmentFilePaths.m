@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWS105AttachmentFilePaths.h"
@@ -20,7 +20,7 @@ static NSString *const OWS105AttachmentFilePathsMigrationId = @"105";
 
 - (void)runUpWithTransaction:(YapDatabaseReadWriteTransaction *)transaction
 {
-    OWSAssert(transaction);
+    OWSAssertDebug(transaction);
 
     NSMutableArray<TSAttachmentStream *> *attachmentStreams = [NSMutableArray new];
     [transaction enumerateKeysAndObjectsInCollection:TSAttachmentStream.collection
@@ -32,13 +32,14 @@ static NSString *const OWS105AttachmentFilePathsMigrationId = @"105";
                                               [attachmentStreams addObject:attachmentStream];
                                           }];
 
-    DDLogInfo(@"Saving %zd attachment streams.", attachmentStreams.count);
+    OWSLogInfo(@"Saving %lu attachment streams.", (unsigned long)attachmentStreams.count);
 
     // Persist the new localRelativeFilePath property of TSAttachmentStream.
     // For performance, we want to upgrade all existing attachment streams in
     // a single transaction.
     for (TSAttachmentStream *attachmentStream in attachmentStreams) {
-        [attachmentStream saveWithTransaction:transaction];
+        // NOTE: Use legacy save.
+        [attachmentStream ydb_saveWithTransaction:transaction];
     }
 }
 

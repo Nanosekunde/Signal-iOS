@@ -1,12 +1,13 @@
-//  Created by Michael Kirk on 9/25/16.
-//  Copyright © 2016 Open Whisper Systems. All rights reserved.
+//
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
+//
 
 #import "OWSDisappearingMessagesConfiguration.h"
-#import <XCTest/XCTest.h>
+#import "SSKBaseTestObjC.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface OWSDisappearingMessagesConfigurationTest : XCTestCase
+@interface OWSDisappearingMessagesConfigurationTest : SSKBaseTestObjC
 
 @end
 
@@ -18,7 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
         [[OWSDisappearingMessagesConfiguration alloc] initWithThreadId:@"fake-thread-id"
                                                                enabled:YES
                                                        durationSeconds:10];
-    XCTAssertTrue(configuration.dictionaryValueDidChange);
+    XCTAssertFalse(configuration.dictionaryValueDidChange);
 
     [configuration save];
     XCTAssertFalse(configuration.dictionaryValueDidChange);

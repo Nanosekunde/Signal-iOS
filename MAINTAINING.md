@@ -14,8 +14,8 @@ Similarly, Carthage dependencies can be updated like so:
 `carthage update`
 
 WebRTC updates are managed separately and manually based on
-https://github.com/WhisperSystems/signal-webrtc-ios
+https://github.com/signalapp/signal-webrtc-ios
 
 ## Translations
 
-Read more about translations in [TRANSLATIONS.md](signal/translations/TRANSLATIONS.md)
+Read more about translations in [TRANSLATIONS.md](Signal/translations/TRANSLATIONS.md)

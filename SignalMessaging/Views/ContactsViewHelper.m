@@ -1,25 +1,24 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "ContactsViewHelper.h"
 #import "Environment.h"
-#import "NSString+OWS.h"
 #import "UIUtil.h"
+#import <ContactsUI/ContactsUI.h>
 #import <SignalMessaging/OWSProfileManager.h>
 #import <SignalMessaging/SignalMessaging-Swift.h>
 #import <SignalServiceKit/AppContext.h>
 #import <SignalServiceKit/Contact.h>
+#import <SignalServiceKit/NSString+SSK.h>
 #import <SignalServiceKit/OWSBlockingManager.h>
 #import <SignalServiceKit/PhoneNumber.h>
 #import <SignalServiceKit/SignalAccount.h>
 #import <SignalServiceKit/TSAccountManager.h>
 
-@import ContactsUI;
-
 NS_ASSUME_NONNULL_BEGIN
 
-@interface ContactsViewHelper ()
+@interface ContactsViewHelper () <OWSBlockListCacheDelegate>
 
 // This property is a cached value that is lazy-populated.
 @property (nonatomic, nullable) NSArray<Contact *> *nonSignalContacts;
@@ -27,12 +26,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) NSDictionary<NSString *, SignalAccount *> *signalAccountMap;
 @property (nonatomic) NSArray<SignalAccount *> *signalAccounts;
 
-@property (nonatomic) NSArray<NSString *> *blockedPhoneNumbers;
+@property (nonatomic, readonly) OWSBlockListCache *blockListCache;
 
 @property (nonatomic) BOOL shouldNotifyDelegateOfUpdatedContacts;
 @property (nonatomic) BOOL hasUpdatedContactsAtLeastOnce;
 @property (nonatomic) OWSProfileManager *profileManager;
-@property (nonatomic, readonly) ConversationSearcher *conversationSearcher;
+@property (nonatomic, readonly) FullTextSearcher *fullTextSearcher;
 
 @end
 
@@ -47,14 +46,16 @@ NS_ASSUME_NONNULL_BEGIN
         return self;
     }
 
-    OWSAssert(delegate);
+    OWSAssertDebug(delegate);
     _delegate = delegate;
 
     _blockingManager = [OWSBlockingManager sharedManager];
-    _blockedPhoneNumbers = [_blockingManager blockedPhoneNumbers];
-    _conversationSearcher = ConversationSearcher.shared;
+    _blockListCache = [OWSBlockListCache new];
+    [_blockListCache startObservingAndSyncStateWithDelegate:self];
 
-    _contactsManager = [Environment current].contactsManager;
+    _fullTextSearcher = FullTextSearcher.shared;
+
+    _contactsManager = Environment.shared.contactsManager;
     _profileManager = [OWSProfileManager sharedManager];
 
     // We don't want to notify the delegate in the `updateContacts`.
@@ -73,10 +74,6 @@ NS_ASSUME_NONNULL_BEGIN
                                              selector:@selector(signalAccountsDidChange:)
                                                  name:OWSContactsManagerSignalAccountsDidChangeNotification
                                                object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(blockedPhoneNumbersDidChange:)
-                                                 name:kNSNotificationName_BlockedPhoneNumbersDidChange
-                                               object:nil];
 }
 
 - (void)dealloc
@@ -91,23 +88,22 @@ NS_ASSUME_NONNULL_BEGIN
     [self updateContacts];
 }
 
-- (void)blockedPhoneNumbersDidChange:(id)notification
-{
-    OWSAssertIsOnMainThread();
-
-    self.blockedPhoneNumbers = [_blockingManager blockedPhoneNumbers];
-
-    [self updateContacts];
-}
-
 #pragma mark - Contacts
 
-- (nullable SignalAccount *)signalAccountForRecipientId:(NSString *)recipientId
+- (nullable SignalAccount *)fetchSignalAccountForRecipientId:(NSString *)recipientId
 {
     OWSAssertIsOnMainThread();
-    OWSAssert(recipientId.length > 0);
+    OWSAssertDebug(recipientId.length > 0);
 
     return self.signalAccountMap[recipientId];
+}
+
+- (SignalAccount *)fetchOrBuildSignalAccountForRecipientId:(NSString *)recipientId
+{
+    OWSAssertDebug(recipientId.length > 0);
+
+    SignalAccount *_Nullable signalAccount = [self fetchSignalAccountForRecipientId:recipientId];
+    return (signalAccount ?: [[SignalAccount alloc] initWithRecipientId:recipientId]);
 }
 
 - (BOOL)isSignalAccountHidden:(SignalAccount *)signalAccount
@@ -150,7 +146,28 @@ NS_ASSUME_NONNULL_BEGIN
 {
     OWSAssertIsOnMainThread();
 
-    return [_blockedPhoneNumbers containsObject:recipientId];
+    return [self.blockListCache isRecipientIdBlocked:recipientId];
+}
+
+- (BOOL)isGroupIdBlocked:(NSData *)groupId
+{
+    OWSAssertIsOnMainThread();
+
+    return [self.blockListCache isGroupIdBlocked:groupId];
+}
+
+- (BOOL)isThreadBlocked:(TSThread *)thread
+{
+    if ([thread isKindOfClass:[TSContactThread class]]) {
+        TSContactThread *contactThread = (TSContactThread *)thread;
+        return [self isRecipientIdBlocked:contactThread.contactIdentifier];
+    } else if ([thread isKindOfClass:[TSGroupThread class]]) {
+        TSGroupThread *groupThread = (TSGroupThread *)thread;
+        return [self isGroupIdBlocked:groupThread.groupModel.groupId];
+    } else {
+        OWSFailDebug(@"%@ failure: unexpected thread: %@", self.logTag, thread.class);
+        return NO;
+    }
 }
 
 - (void)updateContacts
@@ -188,13 +205,17 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (NSArray<SignalAccount *> *)signalAccountsMatchingSearchString:(NSString *)searchText
 {
-    return [self.conversationSearcher filterSignalAccounts:self.signalAccounts withSearchText:searchText];
+    // Check for matches against "Note to Self".
+    NSMutableArray<SignalAccount *> *signalAccountsToSearch = [self.signalAccounts mutableCopy];
+    SignalAccount *selfAccount = [[SignalAccount alloc] initWithRecipientId:self.localNumber];
+    [signalAccountsToSearch addObject:selfAccount];
+    return [self.fullTextSearcher filterSignalAccounts:signalAccountsToSearch withSearchText:searchText];
 }
 
 - (BOOL)doesContact:(Contact *)contact matchSearchTerm:(NSString *)searchTerm
 {
-    OWSAssert(contact);
-    OWSAssert(searchTerm.length > 0);
+    OWSAssertDebug(contact);
+    OWSAssertDebug(searchTerm.length > 0);
 
     if ([contact.fullName.lowercaseString containsString:searchTerm.lowercaseString]) {
         return YES;
@@ -214,8 +235,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (BOOL)doesContact:(Contact *)contact matchSearchTerms:(NSArray<NSString *> *)searchTerms
 {
-    OWSAssert(contact);
-    OWSAssert(searchTerms.count > 0);
+    OWSAssertDebug(contact);
+    OWSAssertDebug(searchTerms.count > 0);
 
     for (NSString *searchTerm in searchTerms) {
         if (![self doesContact:contact matchSearchTerm:searchTerm]) {
@@ -240,11 +261,40 @@ NS_ASSUME_NONNULL_BEGIN
     }]];
 }
 
+- (void)warmNonSignalContactsCacheAsync
+{
+    OWSAssertIsOnMainThread();
+    if (self.nonSignalContacts != nil) {
+        return;
+    }
+
+    NSMutableSet<Contact *> *nonSignalContactSet = [NSMutableSet new];
+    __block NSArray<Contact *> *nonSignalContacts;
+
+    [OWSPrimaryStorage.dbReadConnection
+        asyncReadWithBlock:^(YapDatabaseReadTransaction *transaction) {
+            for (Contact *contact in self.contactsManager.allContactsMap.allValues) {
+                NSArray<SignalRecipient *> *signalRecipients = [contact signalRecipientsWithTransaction:transaction];
+                if (signalRecipients.count < 1) {
+                    [nonSignalContactSet addObject:contact];
+                }
+            }
+            nonSignalContacts = [nonSignalContactSet.allObjects
+                sortedArrayUsingComparator:^NSComparisonResult(Contact *_Nonnull left, Contact *_Nonnull right) {
+                    return [left.fullName compare:right.fullName];
+                }];
+        }
+        completionBlock:^{
+            self.nonSignalContacts = nonSignalContacts;
+        }];
+}
+
 - (nullable NSArray<Contact *> *)nonSignalContacts
 {
+    OWSAssertIsOnMainThread();
     if (!_nonSignalContacts) {
         NSMutableSet<Contact *> *nonSignalContacts = [NSMutableSet new];
-        [TSStorageManager.dbReadConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
+        [OWSPrimaryStorage.dbReadConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
             for (Contact *contact in self.contactsManager.allContactsMap.allValues) {
                 NSArray<SignalRecipient *> *signalRecipients = [contact signalRecipientsWithTransaction:transaction];
                 if (signalRecipients.count < 1) {
@@ -265,7 +315,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)presentMissingContactAccessAlertControllerFromViewController:(UIViewController *)viewController
 {
-    UIAlertController *alertController = [UIAlertController
+    [ContactsViewHelper presentMissingContactAccessAlertControllerFromViewController:viewController];
+}
+
++ (void)presentMissingContactAccessAlertControllerFromViewController:(UIViewController *)viewController
+{
+    UIAlertController *alert = [UIAlertController
         alertControllerWithTitle:NSLocalizedString(@"EDIT_CONTACT_WITHOUT_CONTACTS_PERMISSION_ALERT_TITLE", comment
                                                    : @"Alert title for when the user has just tried to edit a "
                                                      @"contacts after declining to give Signal contacts "
@@ -276,20 +331,18 @@ NS_ASSUME_NONNULL_BEGIN
                                                      @"permissions")
                   preferredStyle:UIAlertControllerStyleAlert];
 
-    [alertController
-        addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"AB_PERMISSION_MISSING_ACTION_NOT_NOW",
-                                                     @"Button text to dismiss missing contacts permission alert")
-                                           style:UIAlertActionStyleCancel
-                                         handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"AB_PERMISSION_MISSING_ACTION_NOT_NOW",
+                                                        @"Button text to dismiss missing contacts permission alert")
+                            accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"not_now")
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
 
-    [alertController addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"OPEN_SETTINGS_BUTTON",
-                                                                  @"Button text which opens the settings app")
-                                                        style:UIAlertActionStyleDefault
-                                                      handler:^(UIAlertAction *_Nonnull action) {
-                                                          [CurrentAppContext() openSystemSettings];
-                                                      }]];
+    UIAlertAction *_Nullable openSystemSettingsAction = CurrentAppContext().openSystemSettingsAction;
+    if (openSystemSettingsAction) {
+        [alert addAction:openSystemSettingsAction];
+    }
 
-    [viewController presentViewController:alertController animated:YES completion:nil];
+    [viewController presentAlert:alert];
 }
 
 - (void)presentContactViewControllerForRecipientId:(NSString *)recipientId
@@ -305,13 +358,13 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)presentContactViewControllerForRecipientId:(NSString *)recipientId
                                 fromViewController:(UIViewController<ContactEditingDelegate> *)fromViewController
                                    editImmediately:(BOOL)shouldEditImmediately
-                            addToExistingCnContact:(CNContact *_Nullable)addToExistingCnContact
+                            addToExistingCnContact:(CNContact *_Nullable)existingContact
 {
-    SignalAccount *signalAccount = [self signalAccountForRecipientId:recipientId];
+    SignalAccount *signalAccount = [self fetchSignalAccountForRecipientId:recipientId];
 
     if (!self.contactsManager.supportsContactEditing) {
         // Should not expose UI that lets the user get here.
-        OWSFail(@"%@ Contact editing not supported.", self.logTag);
+        OWSFailDebug(@"Contact editing not supported.");
         return;
     }
 
@@ -322,8 +375,8 @@ NS_ASSUME_NONNULL_BEGIN
 
     CNContactViewController *_Nullable contactViewController;
     CNContact *_Nullable cnContact = nil;
-    if (addToExistingCnContact) {
-        CNMutableContact *updatedContact = [addToExistingCnContact mutableCopy];
+    if (existingContact) {
+        CNMutableContact *updatedContact = [existingContact mutableCopy];
         NSMutableArray<CNLabeledValue *> *phoneNumbers
             = (updatedContact.phoneNumbers ? [updatedContact.phoneNumbers mutableCopy] : [NSMutableArray new]);
         // Only add recipientId as a phone number for the existing contact
@@ -332,8 +385,8 @@ NS_ASSUME_NONNULL_BEGIN
         for (CNLabeledValue *existingPhoneNumber in phoneNumbers) {
             CNPhoneNumber *phoneNumber = existingPhoneNumber.value;
             if ([phoneNumber.stringValue isEqualToString:recipientId]) {
-                OWSFail(@"We currently only should the 'add to existing contact' UI for phone numbers that don't "
-                        @"correspond to an existing user.");
+                OWSFailDebug(@"We currently only should the 'add to existing contact' UI for phone numbers that don't "
+                             @"correspond to an existing user.");
                 hasPhoneNumber = YES;
                 break;
             }
@@ -352,7 +405,7 @@ NS_ASSUME_NONNULL_BEGIN
         cnContact = updatedContact;
     }
     if (signalAccount && !cnContact) {
-        cnContact = signalAccount.contact.cnContact;
+        cnContact = [self.contactsManager cnContactWithId:signalAccount.contact.cnContactId];
     }
     if (cnContact) {
         if (shouldEditImmediately) {
@@ -388,20 +441,21 @@ NS_ASSUME_NONNULL_BEGIN
                                          style:UIBarButtonItemStylePlain
                                         target:fromViewController
                                         action:@selector(didFinishEditingContact)];
+    contactViewController.edgesForExtendedLayout = UIRectEdgeNone;
 
-    UINavigationController *navigationController =
-        [[UINavigationController alloc] initWithRootViewController:contactViewController];
+    OWSNavigationController *modal = [[OWSNavigationController alloc] initWithRootViewController:contactViewController];
 
     // We want the presentation to imply a "replacement" in this case.
     if (shouldEditImmediately) {
-        navigationController.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+        modal.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
     }
-    [fromViewController presentViewController:navigationController animated:YES completion:nil];
+    [fromViewController presentViewController:modal animated:YES completion:nil];
+}
 
-    // HACK otherwise CNContactViewController Navbar is shown as black.
-    // RADAR rdar://28433898 http://www.openradar.me/28433898
-    // CNContactViewController incompatible with opaque navigation bar
-    [UIUtil applyDefaultSystemAppearence];
+- (void)blockListCacheDidUpdate:(OWSBlockListCache *)blocklistCache
+{
+    OWSAssertIsOnMainThread();
+    [self updateContacts];
 }
 
 @end

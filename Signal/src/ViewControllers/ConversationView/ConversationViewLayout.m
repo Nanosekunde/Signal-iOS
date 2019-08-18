@@ -1,14 +1,16 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "ConversationViewLayout.h"
+#import "Signal-Swift.h"
 #import "UIView+OWS.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
 @interface ConversationViewLayout ()
 
+@property (nonatomic) CGFloat lastViewWidth;
 @property (nonatomic) CGSize contentSize;
 
 @property (nonatomic, readonly) NSMutableDictionary<NSNumber *, UICollectionViewLayoutAttributes *> *itemAttributesMap;
@@ -19,8 +21,7 @@ NS_ASSUME_NONNULL_BEGIN
 // layout without incurring any of the (great) expense of performing an
 // unnecessary layout pass.
 @property (nonatomic) BOOL hasLayout;
-
-@property (nonatomic) int contentWidth;
+@property (nonatomic) BOOL hasEverHadLayout;
 
 @end
 
@@ -28,13 +29,23 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation ConversationViewLayout
 
-- (instancetype)init
+- (instancetype)initWithConversationStyle:(ConversationStyle *)conversationStyle
 {
     if (self = [super init]) {
         _itemAttributesMap = [NSMutableDictionary new];
+        _conversationStyle = conversationStyle;
     }
 
     return self;
+}
+
+- (void)setHasLayout:(BOOL)hasLayout
+{
+    _hasLayout = hasLayout;
+
+    if (hasLayout) {
+        self.hasEverHadLayout = YES;
+    }
 }
 
 - (void)invalidateLayout
@@ -56,6 +67,7 @@ NS_ASSUME_NONNULL_BEGIN
     self.contentSize = CGSizeZero;
     [self.itemAttributesMap removeAllObjects];
     self.hasLayout = NO;
+    self.lastViewWidth = 0.f;
 }
 
 - (void)prepareLayout
@@ -64,13 +76,13 @@ NS_ASSUME_NONNULL_BEGIN
 
     id<ConversationViewLayoutDelegate> delegate = self.delegate;
     if (!delegate) {
-        OWSFail(@"%@ Missing delegate", self.logTag);
+        OWSFailDebug(@"Missing delegate");
         [self clearState];
         return;
     }
+
     if (self.collectionView.bounds.size.width <= 0.f || self.collectionView.bounds.size.height <= 0.f) {
-        OWSFail(
-            @"%@ Collection view has invalid size: %@", self.logTag, NSStringFromCGRect(self.collectionView.bounds));
+        OWSFailDebug(@"Collection view has invalid size: %@", NSStringFromCGRect(self.collectionView.bounds));
         [self clearState];
         return;
     }
@@ -80,50 +92,33 @@ NS_ASSUME_NONNULL_BEGIN
     }
     self.hasLayout = YES;
 
-    // TODO: Remove this log statement after we've reduced the invalidation churn.
-    DDLogVerbose(@"%@ prepareLayout", self.logTag);
+    [self prepareLayoutOfItems];
+}
 
-    const int vInset = 8;
-    const int hInset = 10;
-    const int vSpacing = 5;
-    const int viewWidth = (int)floor(self.collectionView.bounds.size.width);
-    const int contentWidth = (int)floor(viewWidth - 2 * hInset);
-    self.contentWidth = contentWidth;
+- (void)prepareLayoutOfItems
+{
+    const CGFloat viewWidth = self.conversationStyle.viewWidth;
 
     NSArray<id<ConversationViewLayoutItem>> *layoutItems = self.delegate.layoutItems;
 
-    CGFloat y = vInset + self.delegate.layoutHeaderHeight;
+    CGFloat y = self.conversationStyle.contentMarginTop + self.delegate.layoutHeaderHeight;
     CGFloat contentBottom = y;
-    BOOL isRTL = self.collectionView.isRTL;
 
     NSInteger row = 0;
+    id<ConversationViewLayoutItem> _Nullable previousLayoutItem = nil;
     for (id<ConversationViewLayoutItem> layoutItem in layoutItems) {
-        CGSize layoutSize = [layoutItem cellSizeForViewWidth:viewWidth contentWidth:contentWidth];
-
-        layoutSize.width = MIN(viewWidth, floor(layoutSize.width));
-        layoutSize.height = floor(layoutSize.height);
-        CGRect itemFrame;
-        switch (layoutItem.layoutAlignment) {
-            case ConversationViewLayoutAlignment_Incoming:
-            case ConversationViewLayoutAlignment_Outgoing: {
-                BOOL isIncoming = layoutItem.layoutAlignment == ConversationViewLayoutAlignment_Incoming;
-                BOOL isLeft = isIncoming ^ isRTL;
-                if (isLeft) {
-                    itemFrame = CGRectMake(hInset, y, layoutSize.width, layoutSize.height);
-                } else {
-                    itemFrame
-                        = CGRectMake(viewWidth - (hInset + layoutSize.width), y, layoutSize.width, layoutSize.height);
-                }
-                break;
-            }
-            case ConversationViewLayoutAlignment_FullWidth:
-                itemFrame = CGRectMake(0, y, viewWidth, layoutSize.height);
-                break;
-            case ConversationViewLayoutAlignment_Center:
-                itemFrame = CGRectMake(
-                    hInset + round((viewWidth - layoutSize.width) * 0.5f), y, layoutSize.width, layoutSize.height);
-                break;
+        if (previousLayoutItem) {
+            y += [layoutItem vSpacingWithPreviousLayoutItem:previousLayoutItem];
         }
+
+        CGSize layoutSize = CGSizeCeil([layoutItem cellSize]);
+
+        // Ensure cell fits within view.
+        OWSAssertDebug(layoutSize.width <= viewWidth);
+        layoutSize.width = MIN(viewWidth, layoutSize.width);
+
+        // All cells are "full width" and are responsible for aligning their own content.
+        CGRect itemFrame = CGRectMake(0, y, viewWidth, layoutSize.height);
 
         NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:0];
         UICollectionViewLayoutAttributes *itemAttributes =
@@ -132,12 +127,14 @@ NS_ASSUME_NONNULL_BEGIN
         self.itemAttributesMap[@(row)] = itemAttributes;
 
         contentBottom = itemFrame.origin.y + itemFrame.size.height;
-        y = contentBottom + vSpacing;
+        y = contentBottom;
         row++;
+        previousLayoutItem = layoutItem;
     }
 
-    contentBottom += vInset;
+    contentBottom += self.conversationStyle.contentMarginBottom;
     self.contentSize = CGSizeMake(viewWidth, contentBottom);
+    self.lastViewWidth = viewWidth;
 }
 
 - (nullable NSArray<__kindof UICollectionViewLayoutAttributes *> *)layoutAttributesForElementsInRect:(CGRect)rect
@@ -163,7 +160,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (BOOL)shouldInvalidateLayoutForBoundsChange:(CGRect)newBounds
 {
-    return self.collectionView.bounds.size.width != newBounds.size.width;
+    return self.lastViewWidth != newBounds.size.width;
 }
 
 @end

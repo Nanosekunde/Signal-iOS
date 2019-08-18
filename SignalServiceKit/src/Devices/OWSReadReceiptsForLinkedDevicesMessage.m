@@ -1,10 +1,10 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSReadReceiptsForLinkedDevicesMessage.h"
 #import "OWSLinkedDeviceReadReceipt.h"
-#import "OWSSignalServiceProtos.pb.h"
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -28,17 +28,26 @@ NS_ASSUME_NONNULL_BEGIN
     return self;
 }
 
-- (OWSSignalServiceProtosSyncMessageBuilder *)syncMessageBuilder
+- (nullable instancetype)initWithCoder:(NSCoder *)coder
 {
-    OWSSignalServiceProtosSyncMessageBuilder *syncMessageBuilder = [OWSSignalServiceProtosSyncMessageBuilder new];
-    for (OWSLinkedDeviceReadReceipt *readReceipt in self.readReceipts) {
-        OWSSignalServiceProtosSyncMessageReadBuilder *readProtoBuilder =
-            [OWSSignalServiceProtosSyncMessageReadBuilder new];
-        [readProtoBuilder setSender:readReceipt.senderId];
-        [readProtoBuilder setTimestamp:readReceipt.timestamp];
-        [syncMessageBuilder addRead:[readProtoBuilder build]];
-    }
+    return [super initWithCoder:coder];
+}
 
+- (nullable SSKProtoSyncMessageBuilder *)syncMessageBuilder
+{
+    SSKProtoSyncMessageBuilder *syncMessageBuilder = [SSKProtoSyncMessage builder];
+    for (OWSLinkedDeviceReadReceipt *readReceipt in self.readReceipts) {
+        SSKProtoSyncMessageReadBuilder *readProtoBuilder =
+            [SSKProtoSyncMessageRead builderWithSender:readReceipt.senderId timestamp:readReceipt.messageIdTimestamp];
+
+        NSError *error;
+        SSKProtoSyncMessageRead *_Nullable readProto = [readProtoBuilder buildAndReturnError:&error];
+        if (error || !readProto) {
+            OWSFailDebug(@"could not build protobuf: %@", error);
+            return nil;
+        }
+        [syncMessageBuilder addRead:readProto];
+    }
     return syncMessageBuilder;
 }
 

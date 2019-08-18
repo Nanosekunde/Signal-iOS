@@ -1,20 +1,17 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import SignalServiceKit
 
 enum ExperienceUpgradeId: String {
-    case videoCalling = "001",
-    callKit = "002",
-    introducingProfiles = "003",
-    introducingReadReceipts = "004"
+    case introducingStickers = "008"
 }
 
-class ExperienceUpgradeFinder: NSObject {
+@objc public class ExperienceUpgradeFinder: NSObject {
 
-    // MARK - Singleton class
+    // MARK: - Singleton class
 
     @objc(sharedManager)
     public static let shared = ExperienceUpgradeFinder()
@@ -25,56 +22,40 @@ class ExperienceUpgradeFinder: NSObject {
         SwiftSingletons.register(self)
     }
 
-    var videoCalling: ExperienceUpgrade {
-        return ExperienceUpgrade(uniqueId: ExperienceUpgradeId.videoCalling.rawValue,
-                                 title: NSLocalizedString("UPGRADE_EXPERIENCE_VIDEO_TITLE", comment: "Header for upgrade experience"),
-                                 body: NSLocalizedString("UPGRADE_EXPERIENCE_VIDEO_DESCRIPTION", comment: "Description of video calling to upgrading (existing) users"),
-                                 image: #imageLiteral(resourceName: "introductory_splash_video_calling"))
-    }
-
-    var callKit: ExperienceUpgrade {
-        return ExperienceUpgrade(uniqueId: ExperienceUpgradeId.callKit.rawValue,
-                                 title: NSLocalizedString("UPGRADE_EXPERIENCE_CALLKIT_TITLE", comment: "Header for upgrade experience"),
-                                 body: NSLocalizedString("UPGRADE_EXPERIENCE_CALLKIT_DESCRIPTION", comment: "Description of CallKit to upgrading (existing) users"),
-                                 image: #imageLiteral(resourceName: "introductory_splash_callkit"))
-    }
-
-    var introducingProfiles: ExperienceUpgrade {
-        return ExperienceUpgrade(uniqueId: ExperienceUpgradeId.introducingProfiles.rawValue,
-                                 title: NSLocalizedString("UPGRADE_EXPERIENCE_INTRODUCING_PROFILES_TITLE", comment: "Header for upgrade experience"),
-                                 body: NSLocalizedString("UPGRADE_EXPERIENCE_INTRODUCING_PROFILES_DESCRIPTION", comment: "Description of new profile feature for upgrading (existing) users"),
-                                 image:#imageLiteral(resourceName: "introductory_splash_profile"))
-    }
-
-    var introducingReadReceipts: ExperienceUpgrade {
-        return ExperienceUpgrade(uniqueId: ExperienceUpgradeId.introducingReadReceipts.rawValue,
-                                 title: NSLocalizedString("UPGRADE_EXPERIENCE_INTRODUCING_READ_RECEIPTS_TITLE", comment: "Header for upgrade experience"),
-                                 body: NSLocalizedString("UPGRADE_EXPERIENCE_INTRODUCING_READ_RECEIPTS_DESCRIPTION", comment: "Description of new profile feature for upgrading (existing) users"),
-                                 image:#imageLiteral(resourceName: "introductory_splash_read_receipts"))
+    var stickers: ExperienceUpgrade {
+        return ExperienceUpgrade(uniqueId: ExperienceUpgradeId.introducingStickers.rawValue)
     }
 
     // Keep these ordered by increasing uniqueId.
-    private var allExperienceUpgrades: [ExperienceUpgrade] {
+    @objc
+    public var allExperienceUpgrades: [ExperienceUpgrade] {
+        guard FeatureFlags.stickerSend else {
+            return []
+        }
         return [
-            // Disable old experience upgrades. Most people have seen them by now, and accomodating multiple makes layout harder.
-            // Note if we ever want to show multiple experience upgrades again
-            // we'll have to update the layout in ExperienceUpgradesPageViewController
-            //
-            // videoCalling,
-            // (UIDevice.current.supportsCallKit ? callKit : nil),
-            //  introducingProfiles,
-            introducingReadReceipts
-        ].flatMap { $0 }
+            stickers
+        ].compactMap { $0 }
     }
 
     // MARK: - Instance Methods
 
-    public func allUnseen(transaction: YapDatabaseReadTransaction) -> [ExperienceUpgrade] {
-        return allExperienceUpgrades.filter { ExperienceUpgrade.fetch(uniqueId: $0.uniqueId!, transaction: transaction) == nil }
+    @objc
+    public func allUnseen(transaction: SDSAnyReadTransaction) -> [ExperienceUpgrade] {
+        let seen = ExperienceUpgrade.anyFetchAll(transaction: transaction)
+        let seenIds = seen.map { $0.uniqueId! }
+        return allExperienceUpgrades.filter { !seenIds.contains($0.uniqueId!) }
     }
 
-    public func markAllAsSeen(transaction: YapDatabaseReadWriteTransaction) {
-        Logger.info("\(logTag) marking experience upgrades as seen")
-        allExperienceUpgrades.forEach { $0.save(with: transaction) }
+    @objc
+    public func markAsSeen(experienceUpgrade: ExperienceUpgrade, transaction: SDSAnyWriteTransaction) {
+        Logger.info("marking experience upgrade as seen")
+        experienceUpgrade.anyInsert(transaction: transaction)
+    }
+
+    @objc
+    public func markAllAsSeen(transaction: SDSAnyWriteTransaction) {
+        Logger.info("marking experience upgrades as seen")
+        let unseen = allUnseen(transaction: transaction)
+        unseen.forEach { $0.anyInsert(transaction: transaction) }
     }
 }

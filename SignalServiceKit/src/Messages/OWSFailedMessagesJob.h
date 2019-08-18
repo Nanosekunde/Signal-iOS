@@ -1,27 +1,28 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
-@class TSStorageManager;
+@class OWSPrimaryStorage;
+@class OWSStorage;
 
 @interface OWSFailedMessagesJob : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
-- (instancetype)initWithStorageManager:(TSStorageManager *)storageManager NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithPrimaryStorage:(OWSPrimaryStorage *)primaryStorage NS_DESIGNATED_INITIALIZER;
 
 - (void)run;
 
-/**
- * Database extensions required for class to work.
- */
-+ (void)asyncRegisterDatabaseExtensionsWithStorageManager:(TSStorageManager *)storageManager;
++ (NSString *)databaseExtensionName;
++ (void)asyncRegisterDatabaseExtensionsWithPrimaryStorage:(OWSStorage *)storage;
 
+#ifdef DEBUG
 /**
  * Only use the sync version for testing, generally we'll want to register extensions async
  */
 - (void)blockingRegisterDatabaseExtensions;
+#endif
 
 @end
 

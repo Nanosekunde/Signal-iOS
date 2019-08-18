@@ -1,46 +1,60 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
+
+#import "ConversationViewController.h"
+
+NS_ASSUME_NONNULL_BEGIN
 
 @class AccountManager;
 @class CallService;
 @class CallUIAdapter;
 @class HomeViewController;
-@class NotificationsManager;
 @class OWSMessageFetcherJob;
+@class OWSNavigationController;
 @class OWSWebRTCCallMessageHandler;
 @class OutboundCallInitiator;
 @class TSThread;
 
 @interface SignalApp : NSObject
 
-@property (nonatomic, weak) HomeViewController *homeViewController;
-@property (nonatomic, weak) UINavigationController *signUpFlowNavigationController;
-
-// TODO: Convert to singletons?
-@property (nonatomic, readonly) OWSWebRTCCallMessageHandler *callMessageHandler;
-@property (nonatomic, readonly) CallService *callService;
-@property (nonatomic, readonly) CallUIAdapter *callUIAdapter;
-@property (nonatomic, readonly) OutboundCallInitiator *outboundCallInitiator;
-@property (nonatomic, readonly) OWSMessageFetcherJob *messageFetcherJob;
-@property (nonatomic, readonly) NotificationsManager *notificationsManager;
-@property (nonatomic, readonly) AccountManager *accountManager;
+@property (nonatomic, nullable, weak) HomeViewController *homeViewController;
+@property (nonatomic, nullable, weak) OWSNavigationController *signUpFlowNavigationController;
 
 - (instancetype)init NS_UNAVAILABLE;
 
 + (instancetype)sharedApp;
 
-#pragma mark - View Convenience Methods
+- (void)setup;
 
-- (void)presentConversationForRecipientId:(NSString *)recipientId;
-- (void)presentConversationForRecipientId:(NSString *)recipientId withCompose:(BOOL)compose;
-- (void)callRecipientId:(NSString *)recipientId;
-- (void)presentConversationForThreadId:(NSString *)threadId;
-- (void)presentConversationForThread:(TSThread *)thread;
-- (void)presentConversationForThread:(TSThread *)thread withCompose:(BOOL)compose;
+#pragma mark - Conversation Presentation
+
+- (void)presentConversationForRecipientId:(NSString *)recipientId animated:(BOOL)isAnimated;
+
+- (void)presentConversationForRecipientId:(NSString *)recipientId
+                                   action:(ConversationViewAction)action
+                                 animated:(BOOL)isAnimated;
+
+- (void)presentConversationForThreadId:(NSString *)threadId animated:(BOOL)isAnimated;
+
+- (void)presentConversationForThread:(TSThread *)thread animated:(BOOL)isAnimated;
+
+- (void)presentConversationForThread:(TSThread *)thread action:(ConversationViewAction)action animated:(BOOL)isAnimated;
+
+- (void)presentConversationForThread:(TSThread *)thread
+                              action:(ConversationViewAction)action
+                      focusMessageId:(nullable NSString *)focusMessageId
+                            animated:(BOOL)isAnimated;
+
+- (void)presentConversationAndScrollToFirstUnreadMessageForThreadId:(NSString *)threadId animated:(BOOL)isAnimated;
 
 #pragma mark - Methods
 
 + (void)resetAppData;
 
+
+- (void)showHomeView;
+
 @end
+
+NS_ASSUME_NONNULL_END

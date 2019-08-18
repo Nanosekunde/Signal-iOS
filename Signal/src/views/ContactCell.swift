@@ -1,59 +1,92 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
 import Contacts
 import SignalServiceKit
 
-@available(iOS 9.0, *)
 class ContactCell: UITableViewCell {
 
-    static let nib = UINib(nibName:"ContactCell", bundle: nil)
+    public static let kSeparatorHInset: CGFloat = CGFloat(kAvatarDiameter) + 16 + 8
 
-    @IBOutlet weak var contactTextLabel: UILabel!
-    @IBOutlet weak var contactDetailTextLabel: UILabel!
-    @IBOutlet weak var contactImageView: UIImageView!
-    @IBOutlet weak var contactContainerView: UIView!
+    static let kAvatarSpacing: CGFloat = 6
+    static let kAvatarDiameter: UInt = 40
+
+    let contactImageView: AvatarImageView
+    let textStackView: UIStackView
+    let titleLabel: UILabel
+    var subtitleLabel: UILabel
 
     var contact: Contact?
+    var showsWhenSelected: Bool = false
 
-    override func awakeFromNib() {
-        super.awakeFromNib()
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        self.contactImageView = AvatarImageView()
+        self.textStackView = UIStackView()
+        self.titleLabel = UILabel()
+        self.titleLabel.font = UIFont.ows_dynamicTypeBody
+        self.subtitleLabel = UILabel()
+        self.subtitleLabel.font = UIFont.ows_dynamicTypeSubheadline
 
-        // Initialization code
-        selectionStyle = UITableViewCellSelectionStyle.none
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
 
-        contactContainerView.layer.masksToBounds = true
-        contactContainerView.layer.cornerRadius = contactContainerView.frame.size.width/2
+        selectionStyle = UITableViewCell.SelectionStyle.none
 
-        NotificationCenter.default.addObserver(self, selector: #selector(self.didChangePreferredContentSize), name: NSNotification.Name.UIContentSizeCategoryDidChange, object: nil)
+        textStackView.axis = .vertical
+        textStackView.addArrangedSubview(titleLabel)
+
+        contactImageView.autoSetDimensions(to: CGSize(width: CGFloat(ContactCell.kAvatarDiameter), height: CGFloat(ContactCell.kAvatarDiameter)))
+
+        let contentColumns: UIStackView = UIStackView(arrangedSubviews: [contactImageView, textStackView])
+        contentColumns.axis = .horizontal
+        contentColumns.spacing = ContactCell.kAvatarSpacing
+        contentColumns.alignment = .center
+
+        self.contentView.addSubview(contentColumns)
+        contentColumns.autoPinEdgesToSuperviewMargins()
+
+        NotificationCenter.default.addObserver(self, selector: #selector(self.didChangePreferredContentSize), name: UIContentSizeCategory.didChangeNotification, object: nil)
+    }
+
+    required init?(coder aDecoder: NSCoder) {
+        notImplemented()
     }
 
     override func prepareForReuse() {
         accessoryType = .none
+        self.subtitleLabel.removeFromSuperview()
     }
 
     override func setSelected(_ selected: Bool, animated: Bool) {
         super.setSelected(selected, animated: animated)
-        accessoryType = selected ? .checkmark : .none
-    }
-
-    func didChangePreferredContentSize() {
-        contactTextLabel.font = UIFont.preferredFont(forTextStyle: .body)
-        contactDetailTextLabel.font = UIFont.preferredFont(forTextStyle: .subheadline)
-    }
-
-    func updateContactsinUI(_ contact: Contact, subtitleType: SubtitleCellValue, contactsManager: OWSContactsManager) {
-        self.contact = contact
-
-        if contactTextLabel != nil {
-            contactTextLabel.attributedText = contact.cnContact?.formattedFullName(font:contactTextLabel.font)
+        if showsWhenSelected {
+            accessoryType = selected ? .checkmark : .none
         }
+    }
 
-        updateSubtitleBasedonType(subtitleType, contact: contact)
+    @objc func didChangePreferredContentSize() {
+        self.titleLabel.font = UIFont.ows_dynamicTypeBody
+        self.subtitleLabel.font = UIFont.ows_dynamicTypeSubheadline
+    }
 
-        if contact.image == nil {
+    func configure(contact: Contact, subtitleType: SubtitleCellValue, showsWhenSelected: Bool, contactsManager: OWSContactsManager) {
+
+        OWSTableItem.configureCell(self)
+
+        self.contact = contact
+        self.showsWhenSelected = showsWhenSelected
+
+        self.titleLabel.textColor = Theme.primaryColor
+        self.subtitleLabel.textColor = Theme.secondaryColor
+
+        let cnContact = contactsManager.cnContact(withId: contact.cnContactId)
+        titleLabel.attributedText = cnContact?.formattedFullName(font: titleLabel.font)
+        updateSubtitle(subtitleType: subtitleType, contact: contact)
+
+        if let contactImage = contactsManager.avatarImage(forCNContactId: contact.cnContactId) {
+            contactImageView.image = contactImage
+        } else {
             let contactIdForDeterminingBackgroundColor: String
             if let signalId = contact.parsedPhoneNumbers.first?.toE164() {
                 contactIdForDeterminingBackgroundColor = signalId
@@ -61,38 +94,39 @@ class ContactCell: UITableViewCell {
                 contactIdForDeterminingBackgroundColor = contact.fullName
             }
 
-            let kAvatarWidth: UInt = 40
             let avatarBuilder = OWSContactAvatarBuilder(nonSignalName: contact.fullName,
                                                         colorSeed: contactIdForDeterminingBackgroundColor,
-                                                        diameter: kAvatarWidth,
-                                                        contactsManager:contactsManager)
+                                                        diameter: ContactCell.kAvatarDiameter)
 
-            self.contactImageView?.image = avatarBuilder.buildDefaultImage()
-        } else {
-            self.contactImageView?.image = contact.image
+            contactImageView.image = avatarBuilder.build()
         }
     }
 
-    func updateSubtitleBasedonType(_ subtitleType: SubtitleCellValue, contact: Contact) {
+    func updateSubtitle(subtitleType: SubtitleCellValue, contact: Contact) {
         switch subtitleType {
+        case .none:
+            assert(self.subtitleLabel.superview == nil)
+            break
+        case .phoneNumber:
+            self.textStackView.addArrangedSubview(self.subtitleLabel)
 
-        case SubtitleCellValue.phoneNumber:
-            if contact.userTextPhoneNumbers.count > 0 {
-                self.contactDetailTextLabel.text = "\(contact.userTextPhoneNumbers[0])"
+            if let firstPhoneNumber = contact.userTextPhoneNumbers.first {
+                self.subtitleLabel.text = firstPhoneNumber
             } else {
-                self.contactDetailTextLabel.text = NSLocalizedString("CONTACT_PICKER_NO_PHONE_NUMBERS_AVAILABLE", comment: "table cell subtitle when contact card has no known phone number")
+                self.subtitleLabel.text = NSLocalizedString("CONTACT_PICKER_NO_PHONE_NUMBERS_AVAILABLE", comment: "table cell subtitle when contact card has no known phone number")
             }
-        case SubtitleCellValue.email:
-            if contact.emails.count > 0 {
-                self.contactDetailTextLabel.text = "\(contact.emails[0])"
+        case .email:
+            self.textStackView.addArrangedSubview(self.subtitleLabel)
+
+            if let firstEmail = contact.emails.first {
+                self.subtitleLabel.text = firstEmail
             } else {
-                self.contactDetailTextLabel.text = NSLocalizedString("CONTACT_PICKER_NO_EMAILS_AVAILABLE", comment: "table cell subtitle when contact card has no email")
+                self.subtitleLabel.text = NSLocalizedString("CONTACT_PICKER_NO_EMAILS_AVAILABLE", comment: "table cell subtitle when contact card has no email")
             }
         }
     }
 }
 
-@available(iOS 9.0, *)
 fileprivate extension CNContact {
     /**
      * Bold the sorting portion of the name. e.g. if we sort by family name, bold the family name.
@@ -102,21 +136,25 @@ fileprivate extension CNContact {
 
         let boldDescriptor = font.fontDescriptor.withSymbolicTraits(.traitBold)
         let boldAttributes = [
-            NSFontAttributeName: UIFont(descriptor:boldDescriptor!, size: 0)
+            NSAttributedString.Key.font: UIFont(descriptor: boldDescriptor!, size: 0)
         ]
 
         if let attributedName = CNContactFormatter.attributedString(from: self, style: .fullName, defaultAttributes: nil) {
             let highlightedName = attributedName.mutableCopy() as! NSMutableAttributedString
-            highlightedName.enumerateAttributes(in: NSMakeRange(0, highlightedName.length), options: [], using: { (attrs, range, _) in
-                if let property = attrs[CNContactPropertyAttribute] as? String, property == keyToHighlight {
+            highlightedName.enumerateAttributes(in: NSRange(location: 0, length: highlightedName.length), options: [], using: { (attrs, range, _) in
+                if let property = attrs[NSAttributedString.Key(rawValue: CNContactPropertyAttribute)] as? String, property == keyToHighlight {
                     highlightedName.addAttributes(boldAttributes, range: range)
                 }
             })
             return highlightedName
         }
 
-        if let emailAddress = (self.emailAddresses.first?.value as String?) {
-            return NSAttributedString(string: emailAddress, attributes: boldAttributes)
+        if let emailAddress = self.emailAddresses.first?.value {
+            return NSAttributedString(string: emailAddress as String, attributes: boldAttributes)
+        }
+
+        if let phoneNumber = self.phoneNumbers.first?.value.stringValue {
+            return NSAttributedString(string: phoneNumber, attributes: boldAttributes)
         }
 
         return nil

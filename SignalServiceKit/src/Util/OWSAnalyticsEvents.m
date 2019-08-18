@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSAnalyticsEvents.h"
@@ -157,6 +157,11 @@ NS_ASSUME_NONNULL_BEGIN
     return @"call_service_peer_connection_missing";
 }
 
++ (NSString *)callServiceCallDataMissing
+{
+    return @"call_service_call_data_missing";
+}
+
 + (NSString *)contactsErrorContactsIntersectionFailed
 {
     return @"contacts_error_contacts_intersection_failed";
@@ -240,6 +245,11 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)messageManagerErrorCouldNotHandlePrekeyBundle
 {
     return @"message_manager_error_could_not_handle_prekey_bundle";
+}
+
++ (NSString *)messageManagerErrorCouldNotHandleUnidentifiedSenderMessage
+{
+    return @"message_manager_error_could_not_handle_unidentified_sender_message";
 }
 
 + (NSString *)messageManagerErrorCouldNotHandleSecureMessage
@@ -517,9 +527,9 @@ NS_ASSUME_NONNULL_BEGIN
     return @"storage_error_could_not_load_database_second_attempt";
 }
 
-+ (NSString *)storageErrorCouldNotStoreDatabasePassword
++ (NSString *)storageErrorCouldNotStoreKeychainValue
 {
-    return @"storage_error_could_not_store_database_password";
+    return @"storage_error_could_not_store_keychain_value";
 }
 
 + (NSString *)storageErrorDeserialization

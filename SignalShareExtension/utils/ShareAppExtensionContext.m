@@ -1,9 +1,12 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "ShareAppExtensionContext.h"
 #import <SignalMessaging/UIViewController+OWS.h>
+#import <SignalServiceKit/OWSStorage.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSConstants.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -11,11 +14,17 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic) UIViewController *rootViewController;
 
+@property (atomic) UIApplicationState reportedApplicationState;
+
 @end
 
 #pragma mark -
 
 @implementation ShareAppExtensionContext
+
+@synthesize mainWindow = _mainWindow;
+@synthesize appLaunchTime = _appLaunchTime;
+@synthesize buildTime = _buildTime;
 
 - (instancetype)initWithRootViewController:(UIViewController *)rootViewController
 {
@@ -25,9 +34,13 @@ NS_ASSUME_NONNULL_BEGIN
         return self;
     }
 
-    OWSAssert(rootViewController);
+    OWSAssertDebug(rootViewController);
 
     _rootViewController = rootViewController;
+
+    self.reportedApplicationState = UIApplicationStateActive;
+
+    _appLaunchTime = [NSDate new];
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(extensionHostDidBecomeActive:)
@@ -58,24 +71,48 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)extensionHostDidBecomeActive:(NSNotification *)notification
 {
-    DDLogInfo(@"%@ %s", self.logTag, __PRETTY_FUNCTION__);
+    OWSAssertIsOnMainThread();
+
+    OWSLogInfo(@"");
+
+    self.reportedApplicationState = UIApplicationStateActive;
+
+    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationDidBecomeActiveNotification object:nil];
 }
 
 - (void)extensionHostWillResignActive:(NSNotification *)notification
 {
-    DDLogInfo(@"%@ %s", self.logTag, __PRETTY_FUNCTION__);
+    OWSAssertIsOnMainThread();
+
+    self.reportedApplicationState = UIApplicationStateInactive;
+
+    OWSLogInfo(@"");
     [DDLog flushLog];
+
+    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationWillResignActiveNotification object:nil];
 }
 
 - (void)extensionHostDidEnterBackground:(NSNotification *)notification
 {
-    DDLogInfo(@"%@ %s", self.logTag, __PRETTY_FUNCTION__);
+    OWSAssertIsOnMainThread();
+
+    OWSLogInfo(@"");
     [DDLog flushLog];
+
+    self.reportedApplicationState = UIApplicationStateBackground;
+
+    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationDidEnterBackgroundNotification object:nil];
 }
 
 - (void)extensionHostWillEnterForeground:(NSNotification *)notification
 {
-    DDLogInfo(@"%@ %s", self.logTag, __PRETTY_FUNCTION__);
+    OWSAssertIsOnMainThread();
+
+    OWSLogInfo(@"");
+
+    self.reportedApplicationState = UIApplicationStateInactive;
+
+    [NSNotificationCenter.defaultCenter postNotificationName:OWSApplicationWillEnterForegroundNotification object:nil];
 }
 
 #pragma mark -
@@ -92,22 +129,36 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (BOOL)isRTL
 {
-    // Borrowed from PureLayout's AppExtension compatible RTL support.
-    // App Extensions may not access -[UIApplication sharedApplication]; fall back to checking the bundle's preferred
-    // localization character direction
-    return [NSLocale characterDirectionForLanguage:[[NSBundle mainBundle] preferredLocalizations][0]]
-        == NSLocaleLanguageDirectionRightToLeft;
+    static BOOL isRTL = NO;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // Borrowed from PureLayout's AppExtension compatible RTL support.
+        // App Extensions may not access -[UIApplication sharedApplication]; fall back to checking the bundle's
+        // preferred localization character direction
+        isRTL = [NSLocale characterDirectionForLanguage:[[NSBundle mainBundle] preferredLocalizations][0]]
+            == NSLocaleLanguageDirectionRightToLeft;
+    });
+    return isRTL;
 }
 
-- (void)setStatusBarStyle:(UIStatusBarStyle)statusBarStyle
+- (void)setStatusBarHidden:(BOOL)isHidden animated:(BOOL)isAnimated
 {
-    DDLogInfo(@"Ignoring request to set status bar style since we're in an app extension");
+    OWSLogInfo(@"Ignoring request to show/hide status bar since we're in an app extension");
 }
 
-- (UIApplicationState)mainApplicationState
+- (CGFloat)statusBarHeight
 {
-    OWSFail(@"%@ called %s.", self.logTag, __PRETTY_FUNCTION__);
-    return UIApplicationStateBackground;
+    return 20;
+}
+
+- (BOOL)isInBackground
+{
+    return self.reportedApplicationState == UIApplicationStateBackground;
+}
+
+- (BOOL)isAppForegroundAndActive
+{
+    return self.reportedApplicationState == UIApplicationStateActive;
 }
 
 - (UIBackgroundTaskIdentifier)beginBackgroundTaskWithExpirationHandler:
@@ -118,50 +169,89 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)endBackgroundTask:(UIBackgroundTaskIdentifier)backgroundTaskIdentifier
 {
-    OWSAssert(backgroundTaskIdentifier == UIBackgroundTaskInvalid);
+    OWSAssertDebug(backgroundTaskIdentifier == UIBackgroundTaskInvalid);
 }
 
 - (void)ensureSleepBlocking:(BOOL)shouldBeBlocking blockingObjects:(NSArray<id> *)blockingObjects
 {
-    DDLogDebug(@"%@ Ignoring request to block sleep.", self.logTag);
+    OWSLogDebug(@"Ignoring request to block sleep.");
 }
 
 - (void)setMainAppBadgeNumber:(NSInteger)value
 {
-    OWSFail(@"%@ called %s.", self.logTag, __PRETTY_FUNCTION__);
+    OWSFailDebug(@"");
 }
 
 - (nullable UIViewController *)frontmostViewController
 {
-    OWSAssert(self.rootViewController);
+    OWSAssertDebug(self.rootViewController);
 
     return [self.rootViewController findFrontmostViewController:YES];
 }
 
-- (nullable UIView *)rootReferenceView
+- (nullable UIAlertAction *)openSystemSettingsAction
 {
-    return self.rootViewController.view;
-}
-
-- (void)openSystemSettings
-{
-    OWSFail(@"%@ called %s.", self.logTag, __PRETTY_FUNCTION__);
-}
-
-- (void)doMultiDeviceUpdateWithProfileKey:(OWSAES256Key *)profileKey
-{
-    OWSFail(@"%@ called %s.", self.logTag, __PRETTY_FUNCTION__);
+    return nil;
 }
 
 - (BOOL)isRunningTests
 {
-    // TODO: I don't think we'll need to distinguish this in the SAE.
+    // We don't need to distinguish this in the SAE.
     return NO;
+}
+
+- (NSDate *)buildTime
+{
+    if (!_buildTime) {
+        NSInteger buildTimestamp = [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"BuildTimestamp"] integerValue];
+
+        if (buildTimestamp == 0) {
+            // Production builds should _always_ expire, ensure that here.
+            OWSAssert(OWSIsDebugBuild());
+
+            OWSLogDebug(@"No build timestamp, assuming app never expires.");
+            _buildTime = [NSDate distantFuture];
+        } else {
+            _buildTime = [NSDate dateWithTimeIntervalSince1970:buildTimestamp];
+        }
+    }
+
+    return _buildTime;
 }
 
 - (void)setNetworkActivityIndicatorVisible:(BOOL)value
 {
-    OWSFail(@"%@ called %s.", self.logTag, __PRETTY_FUNCTION__);
+    OWSFailDebug(@"");
+}
+
+- (void)runNowOrWhenMainAppIsActive:(AppActiveBlock)block
+{
+    OWSFailDebug(@"cannot run main app active blocks in share extension.");
+}
+
+- (id<SSKKeychainStorage>)keychainStorage
+{
+    return [SSKDefaultKeychainStorage shared];
+}
+
+- (NSString *)appDocumentDirectoryPath
+{
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSURL *documentDirectoryURL =
+        [[fileManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask] lastObject];
+    return [documentDirectoryURL path];
+}
+
+- (NSString *)appSharedDataDirectoryPath
+{
+    NSURL *groupContainerDirectoryURL =
+        [[NSFileManager defaultManager] containerURLForSecurityApplicationGroupIdentifier:SignalApplicationGroup];
+    return [groupContainerDirectoryURL path];
+}
+
+- (NSUserDefaults *)appUserDefaults
+{
+    return [[NSUserDefaults alloc] initWithSuiteName:SignalApplicationGroup];
 }
 
 @end

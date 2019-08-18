@@ -1,55 +1,60 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
+#import "MockSSKEnvironment.h"
+#import "OWSPrimaryStorage.h"
+#import "SSKBaseTestObjC.h"
 #import "SignalRecipient.h"
 #import "TSAccountManager.h"
-#import "TSStorageManager+keyingMaterial.h"
-#import <XCTest/XCTest.h>
+#import "TestAppContext.h"
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
-@interface TSAccountManager (Testing)
-
-- (void)storeLocalNumber:(NSString *)localNumber;
-
-@end
-
-@interface SignalRecipientTest : XCTestCase
+@interface SignalRecipientTest : SSKBaseTestObjC
 
 @property (nonatomic) NSString *localNumber;
 
 @end
+
+#pragma mark -
 
 @implementation SignalRecipientTest
 
 - (void)setUp
 {
     [super setUp];
+
     self.localNumber = @"+13231231234";
     [[TSAccountManager sharedInstance] storeLocalNumber:self.localNumber];
+}
+
+- (void)tearDown
+{
+    [super tearDown];
 }
 
 - (void)testSelfRecipientWithExistingRecord
 {
     // Sanity Check
     XCTAssertNotNil(self.localNumber);
-    [[[SignalRecipient alloc] initWithTextSecureIdentifier:self.localNumber relay:nil] save];
-    XCTAssertNotNil([SignalRecipient recipientWithTextSecureIdentifier:self.localNumber]);
 
-    SignalRecipient *me = [SignalRecipient selfRecipient];
-    XCTAssert(me);
-    XCTAssertEqualObjects(self.localNumber, me.uniqueId);
+    [self yapWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+        [SignalRecipient markRecipientAsRegisteredAndGet:self.localNumber transaction:transaction];
+
+        XCTAssertTrue([SignalRecipient isRegisteredRecipient:self.localNumber transaction:transaction]);
+    }];
 }
 
-- (void)testSelfRecipientWithoutExistingRecord
+- (void)testRecipientWithExistingRecord
 {
+    // Sanity Check
     XCTAssertNotNil(self.localNumber);
-    [[SignalRecipient fetchObjectWithUniqueID:self.localNumber] remove];
-    // Sanity Check that there's no existing user.
-    XCTAssertNil([SignalRecipient recipientWithTextSecureIdentifier:self.localNumber]);
-
-    SignalRecipient *me = [SignalRecipient selfRecipient];
-    XCTAssert(me);
-    XCTAssertEqualObjects(self.localNumber, me.uniqueId);
+    NSString *recipientId = @"+15551231234";
+    [self yapWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+        [SignalRecipient markRecipientAsRegisteredAndGet:recipientId transaction:transaction];
+        
+        XCTAssertTrue([SignalRecipient isRegisteredRecipient:recipientId transaction:transaction]);
+    }];
 }
 
 @end

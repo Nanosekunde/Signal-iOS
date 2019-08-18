@@ -1,12 +1,10 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
 @class TSAttachmentStream;
-
-typedef void (^AttachmentStateBlock)(BOOL isAttachmentReady);
 
 // This entity is used to display upload progress for outgoing
 // attachments in conversation view cells.
@@ -18,9 +16,7 @@ typedef void (^AttachmentStateBlock)(BOOL isAttachmentReady);
 // * Disable any media view controls using a callback.
 @interface AttachmentUploadView : UIView
 
-- (instancetype)initWithAttachment:(TSAttachmentStream *)attachment
-                         superview:(UIView *)superview
-           attachmentStateCallback:(AttachmentStateBlock _Nullable)attachmentStateCallback;
+- (instancetype)initWithAttachment:(TSAttachmentStream *)attachment;
 
 @end
 

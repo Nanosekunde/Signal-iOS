@@ -1,10 +1,10 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSSyncGroupsRequestMessage.h"
-#import "NSDate+OWS.h"
-#import "OWSSignalServiceProtos.pb.h"
+#import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -20,12 +20,25 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithThread:(nullable TSThread *)thread groupId:(NSData *)groupId
 {
-    self = [super initWithTimestamp:[NSDate ows_millisecondTimeStamp] inThread:thread];
+    // MJK TODO - remove senderTimestamp
+    self = [super initOutgoingMessageWithTimestamp:[NSDate ows_millisecondTimeStamp]
+                                          inThread:thread
+                                       messageBody:nil
+                                     attachmentIds:[NSMutableArray new]
+                                  expiresInSeconds:0
+                                   expireStartedAt:0
+                                    isVoiceMessage:NO
+                                  groupMetaMessage:TSGroupMetaMessageUnspecified
+                                     quotedMessage:nil
+                                      contactShare:nil
+                                       linkPreview:nil
+                                    messageSticker:nil
+                                 isViewOnceMessage:NO];
     if (!self) {
         return self;
     }
 
-    OWSAssert(groupId.length > 0);
+    OWSAssertDebug(groupId.length > 0);
     _groupId = groupId;
 
     return self;
@@ -48,14 +61,21 @@ NS_ASSUME_NONNULL_BEGIN
     return YES;
 }
 
-- (OWSSignalServiceProtosDataMessageBuilder *)dataMessageBuilder
+- (nullable SSKProtoDataMessageBuilder *)dataMessageBuilder
 {
-    OWSSignalServiceProtosGroupContextBuilder *groupContextBuilder = [OWSSignalServiceProtosGroupContextBuilder new];
-    [groupContextBuilder setType:OWSSignalServiceProtosGroupContextTypeRequestInfo];
-    [groupContextBuilder setId:self.groupId];
+    SSKProtoGroupContextBuilder *groupContextBuilder = [SSKProtoGroupContext builderWithId:self.groupId];
+    [groupContextBuilder setType:SSKProtoGroupContextTypeRequestInfo];
 
-    OWSSignalServiceProtosDataMessageBuilder *builder = [OWSSignalServiceProtosDataMessageBuilder new];
-    [builder setGroupBuilder:groupContextBuilder];
+    NSError *error;
+    SSKProtoGroupContext *_Nullable groupContextProto = [groupContextBuilder buildAndReturnError:&error];
+    if (error || !groupContextProto) {
+        OWSFailDebug(@"could not build protobuf: %@", error);
+        return nil;
+    }
+
+    SSKProtoDataMessageBuilder *builder = [SSKProtoDataMessage builder];
+    [builder setTimestamp:self.timestamp];
+    [builder setGroup:groupContextProto];
 
     return builder;
 }

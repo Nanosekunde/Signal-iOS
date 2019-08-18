@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
@@ -18,26 +18,31 @@ import SignalServiceKit
 final class CallKitCallManager: NSObject {
 
     let callController = CXCallController()
+    let showNamesOnCallScreen: Bool
+
+    @objc
     static let kAnonymousCallHandlePrefix = "Signal:"
 
-    override required init() {
+    required init(showNamesOnCallScreen: Bool) {
         AssertIsOnMainThread()
 
+        self.showNamesOnCallScreen = showNamesOnCallScreen
         super.init()
 
-        SwiftSingletons.register(self)
+        // We cannot assert singleton here, because this class gets rebuilt when the user changes relevant call settings
     }
 
     // MARK: Actions
 
     func startCall(_ call: SignalCall) {
         var handle: CXHandle
-        if Environment.current().preferences.isCallKitPrivacyEnabled() {
+
+        if showNamesOnCallScreen {
+            handle = CXHandle(type: .phoneNumber, value: call.remotePhoneNumber)
+        } else {
             let callKitId = CallKitCallManager.kAnonymousCallHandlePrefix + call.localId.uuidString
             handle = CXHandle(type: .generic, value: callKitId)
-            TSStorageManager.shared().setPhoneNumber(call.remotePhoneNumber, forCallKitId:callKitId)
-        } else {
-            handle = CXHandle(type: .phoneNumber, value: call.remotePhoneNumber)
+            OWSPrimaryStorage.shared().setPhoneNumber(call.remotePhoneNumber, forCallKitId: callKitId)
         }
 
         let startCallAction = CXStartCallAction(call: call.localId, handle: handle)
@@ -85,9 +90,9 @@ final class CallKitCallManager: NSObject {
     private func requestTransaction(_ transaction: CXTransaction) {
         callController.request(transaction) { error in
             if let error = error {
-                Logger.error("\(self.logTag) Error requesting transaction: \(error)")
+                Logger.error("Error requesting transaction: \(error)")
             } else {
-                Logger.debug("\(self.logTag) Requested transaction successfully")
+                Logger.debug("Requested transaction successfully")
             }
         }
     }
@@ -97,7 +102,7 @@ final class CallKitCallManager: NSObject {
     private(set) var calls = [SignalCall]()
 
     func callWithLocalId(_ localId: UUID) -> SignalCall? {
-        guard let index = calls.index(where: { $0.localId == localId }) else {
+        guard let index = calls.firstIndex(where: { $0.localId == localId }) else {
             return nil
         }
         return calls[index]
@@ -119,7 +124,7 @@ final class CallKitCallManager: NSObject {
 fileprivate extension Array {
 
     mutating func removeFirst(where predicate: (Element) throws -> Bool) rethrows {
-        guard let index = try index(where: predicate) else {
+        guard let index = try firstIndex(where: predicate) else {
             return
         }
 

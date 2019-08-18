@@ -1,43 +1,90 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "AttachmentSharing.h"
 #import "UIUtil.h"
+#import <SignalCoreKit/Threading.h>
 #import <SignalServiceKit/AppContext.h>
 #import <SignalServiceKit/TSAttachmentStream.h>
-#import <SignalServiceKit/Threading.h>
+
+NS_ASSUME_NONNULL_BEGIN
 
 @implementation AttachmentSharing
 
++ (void)showShareUIForAttachments:(NSArray<TSAttachmentStream *> *)attachmentStreams
+                       completion:(nullable AttachmentSharingCompletion)completion
+{
+    OWSAssertDebug(attachmentStreams.count > 0);
+
+    NSMutableArray<NSURL *> *urls = [NSMutableArray new];
+    for (TSAttachmentStream *attachmentStream in attachmentStreams) {
+        [urls addObject:attachmentStream.originalMediaURL];
+    }
+
+    [AttachmentSharing showShareUIForActivityItems:urls completion:completion];
+}
+
 + (void)showShareUIForAttachment:(TSAttachmentStream *)stream
 {
-    OWSAssert(stream);
+    OWSAssertDebug(stream);
 
-    [self showShareUIForURL:stream.mediaURL];
+    [self showShareUIForURL:stream.originalMediaURL];
 }
 
 + (void)showShareUIForURL:(NSURL *)url
 {
-    OWSAssert(url);
+    [self showShareUIForURL:url completion:nil];
+}
 
++ (void)showShareUIForURL:(NSURL *)url completion:(nullable AttachmentSharingCompletion)completion
+{
+    OWSAssertDebug(url);
+    
     [AttachmentSharing showShareUIForActivityItems:@[
-        url,
-    ]];
+                                                     url,
+                                                     ]
+                                        completion:completion];
+}
+
++ (void)showShareUIForURLs:(NSArray<NSURL *> *)urls completion:(nullable AttachmentSharingCompletion)completion
+{
+    OWSAssertDebug(urls.count > 0);
+    
+    [AttachmentSharing showShareUIForActivityItems:urls
+                                        completion:completion];
 }
 
 + (void)showShareUIForText:(NSString *)text
 {
-    OWSAssert(text);
+    [self showShareUIForText:text completion:nil];
+}
+
++ (void)showShareUIForText:(NSString *)text completion:(nullable AttachmentSharingCompletion)completion
+{
+    OWSAssertDebug(text);
 
     [AttachmentSharing showShareUIForActivityItems:@[
         text,
-    ]];
+    ]
+                                        completion:completion];
 }
 
-+ (void)showShareUIForActivityItems:(NSArray *)activityItems
+#ifdef DEBUG
++ (void)showShareUIForUIImage:(UIImage *)image
 {
-    OWSAssert(activityItems);
+    OWSAssertDebug(image);
+
+    [AttachmentSharing showShareUIForActivityItems:@[
+        image,
+    ]
+                                        completion:nil];
+}
+#endif
+
++ (void)showShareUIForActivityItems:(NSArray *)activityItems completion:(nullable AttachmentSharingCompletion)completion
+{
+    OWSAssertDebug(activityItems);
 
     DispatchMainThreadSafe(^{
         UIActivityViewController *activityViewController =
@@ -48,13 +95,14 @@
             NSArray *__nullable returnedItems,
             NSError *__nullable activityError) {
 
-            DDLogDebug(@"%@ applying signal appearence", self.logTag);
-            [UIUtil applySignalAppearence];
-
             if (activityError) {
-                DDLogInfo(@"%@ Failed to share with activityError: %@", self.logTag, activityError);
+                OWSLogInfo(@"Failed to share with activityError: %@", activityError);
             } else if (completed) {
-                DDLogInfo(@"%@ Did share with activityType: %@", self.logTag, activityType);
+                OWSLogInfo(@"Did share with activityType: %@", activityType);
+            }
+
+            if (completion) {
+                DispatchMainThreadSafe(completion);
             }
         }];
 
@@ -62,14 +110,11 @@
         while (fromViewController.presentedViewController) {
             fromViewController = fromViewController.presentedViewController;
         }
-        OWSAssert(fromViewController);
-        [fromViewController presentViewController:activityViewController
-                                         animated:YES
-                                       completion:^{
-                                           DDLogDebug(@"%@ applying default system appearence", self.logTag);
-                                           [UIUtil applyDefaultSystemAppearence];
-                                       }];
+        OWSAssertDebug(fromViewController);
+        [fromViewController presentViewController:activityViewController animated:YES completion:nil];
     });
 }
 
 @end
+
+NS_ASSUME_NONNULL_END

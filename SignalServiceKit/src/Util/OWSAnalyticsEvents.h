@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
@@ -76,6 +76,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (NSString *)callServicePeerConnectionMissing;
 
++ (NSString *)callServiceCallDataMissing;
+
 + (NSString *)contactsErrorContactsIntersectionFailed;
 
 + (NSString *)errorAttachmentRequestFailed;
@@ -109,6 +111,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)messageManagerErrorCorruptMessage;
 
 + (NSString *)messageManagerErrorCouldNotHandlePrekeyBundle;
+
++ (NSString *)messageManagerErrorCouldNotHandleUnidentifiedSenderMessage;
 
 + (NSString *)messageManagerErrorCouldNotHandleSecureMessage;
 
@@ -220,7 +224,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (NSString *)storageErrorCouldNotLoadDatabaseSecondAttempt;
 
-+ (NSString *)storageErrorCouldNotStoreDatabasePassword;
++ (NSString *)storageErrorCouldNotStoreKeychainValue;
 
 + (NSString *)storageErrorDeserialization;
 

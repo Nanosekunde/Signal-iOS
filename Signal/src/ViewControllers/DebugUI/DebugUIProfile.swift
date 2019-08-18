@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -8,44 +8,51 @@ import SignalMessaging
 
 class DebugUIProfile: DebugUIPage {
 
-    let TAG = "[DebugUIProfile]"
-
-    // MARK: Dependencies
+    // MARK: - Dependencies
 
     var messageSender: MessageSender {
-        return Environment.current().messageSender
+        return SSKEnvironment.shared.messageSender
     }
     var profileManager: OWSProfileManager {
         return OWSProfileManager.shared()
     }
 
-    // MARK: Overrides
+    // MARK: - Overrides
 
     override func name() -> String {
         return "Profile"
     }
 
     override func section(thread aThread: TSThread?) -> OWSTableSection? {
+        let profileManager = self.profileManager
         let sectionItems = [
             OWSTableItem(title: "Clear Profile Whitelist") {
-                self.profileManager.clearProfileWhitelist()
+                profileManager.clearProfileWhitelist()
             },
             OWSTableItem(title: "Log Profile Whitelist") {
-                self.profileManager.logProfileWhitelist()
+                profileManager.logProfileWhitelist()
             },
             OWSTableItem(title: "Log User Profiles") {
-                self.profileManager.logUserProfiles()
+                profileManager.logUserProfiles()
+            },
+            OWSTableItem(title: "Log Profile Key") {
+                let localProfileKey = profileManager.localProfileKey()
+                Logger.info("localProfileKey: \(localProfileKey.keyData.hexadecimalString)")
+                profileManager.logUserProfiles()
             },
             OWSTableItem(title: "Regenerate Profile/ProfileKey") {
-                self.profileManager.regenerateLocalProfile()
+                profileManager.regenerateLocalProfile()
             },
-            OWSTableItem(title: "Send Profile Key Message") {
+            OWSTableItem(title: "Send Profile Key Message") { [weak self] in
+                guard let strongSelf = self else { return }
+
+                // MJK TODO - should be safe to remove this senderTimestamp
                 let message = OWSProfileKeyMessage(timestamp: NSDate.ows_millisecondTimeStamp(), in: aThread)
-                self.messageSender.sendPromise(message: message).then {
+                strongSelf.messageSender.sendPromise(message: message).done {
                     Logger.info("Successfully sent profile key message to thread: \(String(describing: aThread))")
-                    }.catch { _ in
-                        owsFail("Failed to send profile key message to thread: \(String(describing: aThread))")
-                }
+                }.catch { _ in
+                    owsFailDebug("Failed to send profile key message to thread: \(String(describing: aThread))")
+                }.retainUntilComplete()
             }
         ]
 

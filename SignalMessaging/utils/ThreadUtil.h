@@ -1,41 +1,40 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
 @class OWSBlockingManager;
+@class OWSContact;
 @class OWSContactsManager;
+@class OWSLinkPreviewDraft;
 @class OWSMessageSender;
+@class OWSQuotedReplyModel;
+@class OWSUnreadIndicator;
+@class SDSAnyReadTransaction;
 @class SignalAttachment;
+@class StickerInfo;
 @class TSContactThread;
+@class TSGroupThread;
 @class TSInteraction;
+@class TSOutgoingMessage;
 @class TSThread;
 @class YapDatabaseConnection;
+@class YapDatabaseReadTransaction;
+@class YapDatabaseReadWriteTransaction;
 
 @interface ThreadDynamicInteractions : NSObject
 
-// If there are unseen messages in the thread, this is the index
-// of the unseen indicator, counting from the _end_ of the conversation
-// history.
+// Represents the "reverse index" of the focus message, if any.
+// The "reverse index" is the distance of this interaction from
+// the last interaction in the thread.  Therefore the last interaction
+// will have a "reverse index" of zero.
 //
-// This is used by MessageViewController to increase the
-// range size of the mappings (the load window of the conversation)
-// to include the unread indicator.
-@property (nonatomic, nullable, readonly) NSNumber *unreadIndicatorPosition;
+// We use "reverse indices" because (among other uses) we use this to
+// determine the initial load window size.
+@property (nonatomic, nullable, readonly) NSNumber *focusMessagePosition;
 
-// If there are unseen messages in the thread, this is the timestamp
-// of the oldest unseen messaage.
-//
-// Once we enter messages view, we mark all messages read, so we need
-// a snapshot of what the first unread message was when we entered the
-// view so that we can call ensureDynamicInteractionsForThread:...
-// repeatedly. The unread indicator should continue to show up until
-// it has been cleared, at which point hideUnreadMessagesIndicator is
-// YES in ensureDynamicInteractionsForThread:...
-@property (nonatomic, nullable, readonly) NSNumber *firstUnseenInteractionTimestamp;
-
-@property (nonatomic, readonly) BOOL hasMoreUnseenMessages;
+@property (nonatomic, nullable, readonly) OWSUnreadIndicator *unreadIndicator;
 
 - (void)clearUnreadIndicatorState;
 
@@ -43,31 +42,54 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark -
 
-@class TSOutgoingMessage;
-
 @interface ThreadUtil : NSObject
 
-+ (TSOutgoingMessage *)sendMessageWithText:(NSString *)text
-                                  inThread:(TSThread *)thread
-                             messageSender:(OWSMessageSender *)messageSender
-                                   success:(void (^)(void))successHandler
-                                   failure:(void (^)(NSError *error))failureHandler;
+#pragma mark - Durable Message Enqueue
 
-+ (TSOutgoingMessage *)sendMessageWithText:(NSString *)text
-                                  inThread:(TSThread *)thread
-                             messageSender:(OWSMessageSender *)messageSender;
++ (TSOutgoingMessage *)enqueueMessageWithText:(NSString *)fullMessageText
+                                     inThread:(TSThread *)thread
+                             quotedReplyModel:(nullable OWSQuotedReplyModel *)quotedReplyModel
+                             linkPreviewDraft:(nullable nullable OWSLinkPreviewDraft *)linkPreviewDraft
+                                  transaction:(SDSAnyReadTransaction *)transaction;
 
-+ (TSOutgoingMessage *)sendMessageWithAttachment:(SignalAttachment *)attachment
-                                        inThread:(TSThread *)thread
-                                   messageSender:(OWSMessageSender *)messageSender
-                                      completion:(void (^_Nullable)(NSError *_Nullable error))completion;
++ (TSOutgoingMessage *)enqueueMessageWithText:(nullable NSString *)fullMessageText
+                             mediaAttachments:(NSArray<SignalAttachment *> *)attachments
+                                     inThread:(TSThread *)thread
+                             quotedReplyModel:(nullable OWSQuotedReplyModel *)quotedReplyModel
+                             linkPreviewDraft:(nullable nullable OWSLinkPreviewDraft *)linkPreviewDraft
+                                  transaction:(SDSAnyReadTransaction *)transaction;
 
-// We only should set ignoreErrors in debug or test code.
-+ (TSOutgoingMessage *)sendMessageWithAttachment:(SignalAttachment *)attachment
-                                        inThread:(TSThread *)thread
-                                   messageSender:(OWSMessageSender *)messageSender
-                                    ignoreErrors:(BOOL)ignoreErrors
-                                      completion:(void (^_Nullable)(NSError *_Nullable error))completion;
++ (TSOutgoingMessage *)enqueueMessageWithContactShare:(OWSContact *)contactShare inThread:(TSThread *)thread;
++ (void)enqueueLeaveGroupMessageInThread:(TSGroupThread *)thread;
++ (TSOutgoingMessage *)enqueueMessageWithSticker:(StickerInfo *)stickerInfo inThread:(TSThread *)thread;
+
+#pragma mark - Non-Durable Sending
+
+// Used by SAE and "reply from lockscreen", otherwise we should use the durable `enqueue` counterpart
++ (TSOutgoingMessage *)sendMessageNonDurablyWithText:(NSString *)fullMessageText
+                                            inThread:(TSThread *)thread
+                                    quotedReplyModel:(nullable OWSQuotedReplyModel *)quotedReplyModel
+                                         transaction:(YapDatabaseReadTransaction *)transaction
+                                       messageSender:(OWSMessageSender *)messageSender
+                                          completion:(void (^)(NSError *_Nullable error))completion;
+
+// Used by SAE, otherwise we should use the durable `enqueue` counterpart
++ (TSOutgoingMessage *)sendMessageNonDurablyWithText:(NSString *)fullMessageText
+                                    mediaAttachments:(NSArray<SignalAttachment *> *)attachments
+                                            inThread:(TSThread *)thread
+                                    quotedReplyModel:(nullable OWSQuotedReplyModel *)quotedReplyModel
+                                         transaction:(YapDatabaseReadTransaction *)transaction
+                                       messageSender:(OWSMessageSender *)messageSender
+                                          completion:(void (^)(NSError *_Nullable error))completion;
+
+// Used by SAE, otherwise we should use the durable `enqueue` counterpart
++ (TSOutgoingMessage *)sendMessageNonDurablyWithContactShare:(OWSContact *)contactShare
+                                                    inThread:(TSThread *)thread
+                                               messageSender:(OWSMessageSender *)messageSender
+                                                  completion:(void (^)(NSError *_Nullable error))completion;
+
+
+#pragma mark - dynamic interactions
 
 // This method will create and/or remove any offers and indicators
 // necessary for this thread.  This includes:
@@ -90,10 +112,11 @@ NS_ASSUME_NONNULL_BEGIN
 + (ThreadDynamicInteractions *)ensureDynamicInteractionsForThread:(TSThread *)thread
                                                   contactsManager:(OWSContactsManager *)contactsManager
                                                   blockingManager:(OWSBlockingManager *)blockingManager
-                                                     dbConnection:(YapDatabaseConnection *)dbConnection
                                       hideUnreadMessagesIndicator:(BOOL)hideUnreadMessagesIndicator
-                                  firstUnseenInteractionTimestamp:(nullable NSNumber *)firstUnseenInteractionTimestamp
-                                                     maxRangeSize:(int)maxRangeSize;
+                                              lastUnreadIndicator:(nullable OWSUnreadIndicator *)lastUnreadIndicator
+                                                   focusMessageId:(nullable NSString *)focusMessageId
+                                                     maxRangeSize:(NSUInteger)maxRangeSize
+                                                      transaction:(SDSAnyReadTransaction *)transaction;
 
 + (BOOL)shouldShowGroupProfileBannerInThread:(TSThread *)thread blockingManager:(OWSBlockingManager *)blockingManager;
 
@@ -103,6 +126,17 @@ NS_ASSUME_NONNULL_BEGIN
 //
 // Returns YES IFF the thread was just added to the profile whitelist.
 + (BOOL)addThreadToProfileWhitelistIfEmptyContactThread:(TSThread *)thread;
+
+#pragma mark - Delete Content
+
++ (void)deleteAllContent;
+
+#pragma mark - Find Content
+
++ (nullable TSInteraction *)findInteractionInThreadByTimestamp:(uint64_t)timestamp
+                                                      authorId:(NSString *)authorId
+                                                threadUniqueId:(NSString *)threadUniqueId
+                                                   transaction:(YapDatabaseReadTransaction *)transaction;
 
 @end
 

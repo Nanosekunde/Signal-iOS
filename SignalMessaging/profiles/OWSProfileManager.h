@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import <SignalServiceKit/ProfileManagerProtocol.h>
@@ -7,12 +7,15 @@
 NS_ASSUME_NONNULL_BEGIN
 
 extern NSString *const kNSNotificationName_ProfileWhitelistDidChange;
+extern NSString *const kNSNotificationName_ProfileKeyDidChange;
 
 extern const NSUInteger kOWSProfileManager_NameDataLength;
 extern const NSUInteger kOWSProfileManager_MaxAvatarDiameter;
 
 @class OWSAES256Key;
 @class OWSMessageSender;
+@class OWSPrimaryStorage;
+@class TSNetworkManager;
 @class TSThread;
 
 // This class can be safely accessed and used from any thread.
@@ -20,11 +23,9 @@ extern const NSUInteger kOWSProfileManager_MaxAvatarDiameter;
 
 - (instancetype)init NS_UNAVAILABLE;
 
+- (instancetype)initWithPrimaryStorage:(OWSPrimaryStorage *)primaryStorage;
+
 + (instancetype)sharedManager;
-
-- (void)resetProfileStorage;
-
-+ (void)migrateToSharedData;
 
 #pragma mark - Local Profile
 
@@ -36,6 +37,7 @@ extern const NSUInteger kOWSProfileManager_MaxAvatarDiameter;
 - (BOOL)hasLocalProfile;
 - (nullable NSString *)localProfileName;
 - (nullable UIImage *)localProfileAvatarImage;
+- (nullable NSData *)localProfileAvatarData;
 - (void)ensureLocalProfileCached;
 
 // This method is used to update the "local profile" state on the client
@@ -50,8 +52,6 @@ extern const NSUInteger kOWSProfileManager_MaxAvatarDiameter;
 
 - (BOOL)isProfileNameTooLong:(nullable NSString *)profileName;
 
-// The local profile state can fall out of sync with the service
-// (e.g. due to a botched profile update, for example).
 - (void)fetchLocalUsersProfile;
 
 #pragma mark - Profile Whitelist
@@ -75,6 +75,7 @@ extern const NSUInteger kOWSProfileManager_MaxAvatarDiameter;
 - (nullable NSString *)profileNameForRecipientId:(NSString *)recipientId;
 
 - (nullable UIImage *)profileAvatarForRecipientId:(NSString *)recipientId;
+- (nullable NSData *)profileAvatarDataForRecipientId:(NSString *)recipientId;
 
 - (void)updateProfileForRecipientId:(NSString *)recipientId
                profileNameEncrypted:(nullable NSData *)profileNameEncrypted

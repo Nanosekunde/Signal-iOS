@@ -1,11 +1,13 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "PhoneNumberUtil.h"
 #import "ContactsManagerProtocol.h"
 #import "FunctionalUtil.h"
 #import <libPhoneNumber_iOS/NBPhoneNumber.h>
+
+NS_ASSUME_NONNULL_BEGIN
 
 @interface PhoneNumberUtil ()
 
@@ -18,13 +20,15 @@
 
 @implementation PhoneNumberUtil
 
-+ (instancetype)sharedUtil {
-    static dispatch_once_t onceToken;
-    static id sharedInstance = nil;
-    dispatch_once(&onceToken, ^{
-      sharedInstance = [self.class new];
-    });
-    return sharedInstance;
++ (PhoneNumberUtil *)sharedThreadLocal
+{
+    NSString *key = PhoneNumberUtil.logTag;
+    PhoneNumberUtil *_Nullable threadLocal = NSThread.currentThread.threadDictionary[key];
+    if (!threadLocal) {
+        threadLocal = [PhoneNumberUtil new];
+        NSThread.currentThread.threadDictionary[key] = threadLocal;
+    }
+    return threadLocal;
 }
 
 - (instancetype)init {
@@ -34,8 +38,6 @@
         _nbPhoneNumberUtil = [[NBPhoneNumberUtil alloc] init];
         _countryCodesFromCallingCodeCache = [NSMutableDictionary new];
         _parsedPhoneNumberCache = [NSCache new];
-
-        OWSSingletonAssert();
     }
 
     return self;
@@ -52,11 +54,11 @@
     if (!result) {
         result = [self.nbPhoneNumberUtil parse:numberToParse defaultRegion:defaultRegion error:error];
         if (error && *error) {
-            OWSAssert(!result);
+            OWSAssertDebug(!result);
             return nil;
         }
 
-        OWSAssert(result);
+        OWSAssertDebug(result);
 
         if (result) {
             [self.parsedPhoneNumberCache setObject:result forKey:hashKey];
@@ -80,8 +82,9 @@
 }
 
 // country code -> country name
-+ (NSString *)countryNameFromCountryCode:(NSString *)countryCode {
-    OWSAssert(countryCode);
++ (nullable NSString *)countryNameFromCountryCode:(NSString *)countryCode
+{
+    OWSAssertDebug(countryCode);
 
     NSDictionary *countryCodeComponent = @{NSLocaleCountryCode : countryCode};
     NSString *identifier               = [NSLocale localeIdentifierFromComponents:countryCodeComponent];
@@ -138,9 +141,10 @@
         return @"+1";
     }
 
-    NSString *callingCode = [NSString stringWithFormat:@"%@%@",
-                                      COUNTRY_CODE_PREFIX,
-                                      [[[self sharedUtil] nbPhoneNumberUtil] getCountryCodeForRegion:countryCode]];
+    NSString *callingCode =
+        [NSString stringWithFormat:@"%@%@",
+                  COUNTRY_CODE_PREFIX,
+                  [[[self sharedThreadLocal] nbPhoneNumberUtil] getCountryCodeForRegion:countryCode]];
     return callingCode;
 }
 
@@ -424,7 +428,7 @@
 {
     @synchronized(self)
     {
-        OWSAssert(callingCode.length > 0);
+        OWSAssertDebug(callingCode.length > 0);
 
         NSArray *result = self.countryCodesFromCallingCodeCache[callingCode];
         if (!result) {
@@ -444,7 +448,7 @@
 
 - (NSString *)probableCountryCodeForCallingCode:(NSString *)callingCode
 {
-    OWSAssert(callingCode.length > 0);
+    OWSAssertDebug(callingCode.length > 0);
 
     NSArray<NSString *> *countryCodes = [self countryCodesFromCallingCode:callingCode];
     return (countryCodes.count > 0 ? countryCodes[0] : nil);
@@ -466,7 +470,7 @@
 }
 
 // search term -> country codes
-+ (NSArray *)countryCodesForSearchTerm:(NSString *)searchTerm {
++ (NSArray *)countryCodesForSearchTerm:(nullable NSString *)searchTerm {
     searchTerm = [searchTerm stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
 
     NSArray *countryCodes = NSLocale.ISOCountryCodes;
@@ -516,9 +520,9 @@
                                  from:(NSString *)source
                                    to:(NSString *)target
                     stickingRightward:(bool)preferHigh {
-    OWSAssert(source != nil);
-    OWSAssert(target != nil);
-    OWSAssert(offset <= source.length);
+    OWSAssertDebug(source != nil);
+    OWSAssertDebug(target != nil);
+    OWSAssertDebug(offset <= source.length);
 
     NSUInteger n = source.length;
     NSUInteger m = target.length;
@@ -578,28 +582,28 @@
 
 + (NSString *)examplePhoneNumberForCountryCode:(NSString *)countryCode
 {
+    PhoneNumberUtil *sharedUtil = [self sharedThreadLocal];
+
     // Signal users are very likely using mobile devices, so prefer that kind of example.
     NSError *error;
     NBPhoneNumber *nbPhoneNumber =
-        [[[self sharedUtil] nbPhoneNumberUtil] getExampleNumberForType:countryCode
-                                                                  type:NBEPhoneNumberTypeMOBILE
-                                                                 error:&error];
-    OWSAssert(!error);
+        [sharedUtil.nbPhoneNumberUtil getExampleNumberForType:countryCode type:NBEPhoneNumberTypeMOBILE error:&error];
+    OWSAssertDebug(!error);
     if (!nbPhoneNumber) {
         // For countries that with similar mobile and land lines, use "line or mobile"
         // examples.
-        nbPhoneNumber =
-            [[[self sharedUtil] nbPhoneNumberUtil] getExampleNumberForType:countryCode
-                                                                      type:NBEPhoneNumberTypeFIXED_LINE_OR_MOBILE
-                                                                     error:&error];
-        OWSAssert(!error);
+        nbPhoneNumber = [sharedUtil.nbPhoneNumberUtil getExampleNumberForType:countryCode
+                                                                         type:NBEPhoneNumberTypeFIXED_LINE_OR_MOBILE
+                                                                        error:&error];
+        OWSAssertDebug(!error);
     }
-    NSString *result = (nbPhoneNumber ? [[[self sharedUtil] nbPhoneNumberUtil] format:nbPhoneNumber
-                                                                         numberFormat:NBEPhoneNumberFormatE164
-                                                                                error:&error]
-                                      : nil);
-    OWSAssert(!error);
+    NSString *result = (nbPhoneNumber
+            ? [sharedUtil.nbPhoneNumberUtil format:nbPhoneNumber numberFormat:NBEPhoneNumberFormatE164 error:&error]
+            : nil);
+    OWSAssertDebug(!error);
     return result;
 }
 
 @end
+
+NS_ASSUME_NONNULL_END

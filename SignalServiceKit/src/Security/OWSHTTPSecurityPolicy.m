@@ -1,10 +1,11 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSHTTPSecurityPolicy.h"
-
 #import <AssertMacros.h>
+
+NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSHTTPSecurityPolicy
 
@@ -22,45 +23,46 @@
 
     if (self) {
         self.pinnedCertificates = [NSSet setWithArray:@[
-            [self certificateDataForService:@"textsecure"],
+            [self.class certificateDataForService:@"textsecure"]
         ]];
     }
 
     return self;
 }
 
-- (NSArray *)certs {
-    return @[ (__bridge id)[self certificateForService:@"textsecure"] ];
-}
-
-- (NSData *)certificateDataForService:(NSString *)service {
-    SecCertificateRef certRef = [self certificateForService:service];
-    return (__bridge_transfer NSData *)SecCertificateCopyData(certRef);
-}
-
-- (SecCertificateRef)certificateForService:(NSString *)service {
-    
++ (NSData *)dataFromCertificateFileForService:(NSString *)service
+{
     NSBundle *bundle = [NSBundle bundleForClass:self.class];
     NSString *path = [bundle pathForResource:service ofType:@"cer"];
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
-        @throw [NSException
-            exceptionWithName:@"Missing server certificate"
-                       reason:[NSString stringWithFormat:@"Missing signing certificate for service %@", service]
-                     userInfo:nil];
+        OWSFail(@"Missing signing certificate for service %@", service);
     }
 
-    NSData *certificateData = [NSData dataWithContentsOfFile:path];
+    NSData *data = [NSData dataWithContentsOfFile:path];
+    OWSAssert(data.length > 0);
+    
+    return data;
+}
+
++ (NSData *)certificateDataForService:(NSString *)service {
+    SecCertificateRef certRef = [self certificateForService:service];
+    return (__bridge_transfer NSData *)SecCertificateCopyData(certRef);
+}
+
++ (SecCertificateRef)certificateForService:(NSString *)service
+{
+    NSData *certificateData = [self dataFromCertificateFileForService:service];
     return SecCertificateCreateWithData(NULL, (__bridge CFDataRef)(certificateData));
 }
 
-
-- (BOOL)evaluateServerTrust:(SecTrustRef)serverTrust forDomain:(NSString *)domain {
+- (BOOL)evaluateServerTrust:(SecTrustRef)serverTrust forDomain:(nullable NSString *)domain
+{
     NSMutableArray *policies = [NSMutableArray array];
     [policies addObject:(__bridge_transfer id)SecPolicyCreateSSL(true, (__bridge CFStringRef)domain)];
 
     if (SecTrustSetPolicies(serverTrust, (__bridge CFArrayRef)policies) != errSecSuccess) {
-        DDLogError(@"The trust policy couldn't be set.");
+        OWSLogError(@"The trust policy couldn't be set.");
         return NO;
     }
 
@@ -71,7 +73,7 @@
     }
 
     if (SecTrustSetAnchorCertificates(serverTrust, (__bridge CFArrayRef)pinnedCertificates) != errSecSuccess) {
-        DDLogError(@"The anchor certificates couldn't be set.");
+        OWSLogError(@"The anchor certificates couldn't be set.");
         return NO;
     }
 
@@ -93,4 +95,11 @@ _out:
     return isValid;
 }
 
+NSData *SSKTextSecureServiceCertificateData()
+{
+    return [OWSHTTPSecurityPolicy dataFromCertificateFileForService:@"textsecure"];
+}
+
 @end
+
+NS_ASSUME_NONNULL_END

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "DebugUISyncMessages.h"
@@ -7,27 +7,25 @@
 #import "OWSTableViewController.h"
 #import "Signal-Swift.h"
 #import "ThreadUtil.h"
-#import <AFNetworking/AFNetworking.h>
 #import <AxolotlKit/PreKeyBundle.h>
-#import <Curve25519Kit/Randomness.h>
+#import <PromiseKit/AnyPromise.h>
+#import <SignalCoreKit/Randomness.h>
 #import <SignalMessaging/Environment.h>
 #import <SignalServiceKit/OWSBatchMessageProcessor.h>
 #import <SignalServiceKit/OWSBlockingManager.h>
 #import <SignalServiceKit/OWSDisappearingConfigurationUpdateInfoMessage.h>
 #import <SignalServiceKit/OWSDisappearingMessagesConfiguration.h>
+#import <SignalServiceKit/OWSPrimaryStorage.h>
 #import <SignalServiceKit/OWSReadReceiptManager.h>
-#import <SignalServiceKit/OWSSyncConfigurationMessage.h>
-#import <SignalServiceKit/OWSSyncContactsMessage.h>
 #import <SignalServiceKit/OWSSyncGroupsMessage.h>
 #import <SignalServiceKit/OWSSyncGroupsRequestMessage.h>
 #import <SignalServiceKit/OWSVerificationStateChangeMessage.h>
-#import <SignalServiceKit/SecurityUtils.h>
+#import <SignalServiceKit/SSKSessionStore.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/TSCall.h>
 #import <SignalServiceKit/TSDatabaseView.h>
 #import <SignalServiceKit/TSIncomingMessage.h>
 #import <SignalServiceKit/TSInvalidIdentityKeyReceivingErrorMessage.h>
-#import <SignalServiceKit/TSStorageManager+SessionStore.h>
-#import <SignalServiceKit/TSStorageManager.h>
 #import <SignalServiceKit/TSThread.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -64,14 +62,14 @@ NS_ASSUME_NONNULL_BEGIN
     return [OWSTableSection sectionWithTitle:self.name items:items];
 }
 
-+ (OWSMessageSender *)messageSender
++ (MessageSenderJobQueue *)messageSenderJobQueue
 {
-    return [Environment current].messageSender;
+    return SSKEnvironment.shared.messageSenderJobQueue;
 }
 
 + (OWSContactsManager *)contactsManager
 {
-    return [Environment current].contactsManager;
+    return Environment.shared.contactsManager;
 }
 
 + (OWSIdentityManager *)identityManager
@@ -91,26 +89,21 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (YapDatabaseConnection *)dbConnection
 {
-    return [TSStorageManager.sharedManager newDatabaseConnection];
+    return [OWSPrimaryStorage.sharedManager newDatabaseConnection];
 }
+
++ (id<OWSSyncManagerProtocol>)syncManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.syncManager);
+
+    return SSKEnvironment.shared.syncManager;
+}
+
+#pragma mark -
 
 + (void)sendContactsSyncMessage
 {
-    OWSSyncContactsMessage *syncContactsMessage =
-        [[OWSSyncContactsMessage alloc] initWithSignalAccounts:self.contactsManager.signalAccounts
-                                               identityManager:self.identityManager
-                                                profileManager:self.profileManager];
-    DataSource *dataSource =
-        [DataSourceValue dataSourceWithSyncMessage:[syncContactsMessage buildPlainTextAttachmentData]];
-    [self.messageSender enqueueTemporaryAttachment:dataSource
-        contentType:OWSMimeTypeApplicationOctetStream
-        inMessage:syncContactsMessage
-        success:^{
-            DDLogInfo(@"%@ Successfully sent Contacts response syncMessage.", self.logTag);
-        }
-        failure:^(NSError *error) {
-            DDLogError(@"%@ Failed to send Contacts response syncMessage with error: %@", self.logTag, error);
-        }];
+    [[self.syncManager syncAllContacts] retainUntilComplete];
 }
 
 + (void)sendGroupSyncMessage
@@ -119,41 +112,26 @@ NS_ASSUME_NONNULL_BEGIN
     __block DataSource *dataSource;
     [self.dbConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
         dataSource = [DataSourceValue
-            dataSourceWithSyncMessage:[syncGroupsMessage buildPlainTextAttachmentDataWithTransaction:transaction]];
+            dataSourceWithSyncMessageData:[syncGroupsMessage buildPlainTextAttachmentDataWithTransaction:transaction]];
     }];
-    [self.messageSender enqueueTemporaryAttachment:dataSource
-        contentType:OWSMimeTypeApplicationOctetStream
-        inMessage:syncGroupsMessage
-        success:^{
-            DDLogInfo(@"%@ Successfully sent Groups response syncMessage.", self.logTag);
-        }
-        failure:^(NSError *error) {
-            DDLogError(@"%@ Failed to send Groups response syncMessage with error: %@", self.logTag, error);
-        }];
+
+    [self.messageSenderJobQueue addMediaMessage:syncGroupsMessage
+                                     dataSource:dataSource
+                                    contentType:OWSMimeTypeApplicationOctetStream
+                                 sourceFilename:nil
+                                        caption:nil
+                                 albumMessageId:nil
+                          isTemporaryAttachment:YES];
 }
 
 + (void)sendBlockListSyncMessage
 {
-    [self.blockingManager syncBlockedPhoneNumbers];
+    [self.blockingManager syncBlockList];
 }
 
 + (void)sendConfigurationSyncMessage
 {
-    __block BOOL areReadReceiptsEnabled;
-    [self.dbConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-        areReadReceiptsEnabled =
-            [[OWSReadReceiptManager sharedManager] areReadReceiptsEnabledWithTransaction:transaction];
-    }];
-
-    OWSSyncConfigurationMessage *syncConfigurationMessage =
-        [[OWSSyncConfigurationMessage alloc] initWithReadReceiptsEnabled:areReadReceiptsEnabled];
-    [self.messageSender enqueueMessage:syncConfigurationMessage
-        success:^{
-            DDLogInfo(@"%@ Successfully sent Configuration response syncMessage.", self.logTag);
-        }
-        failure:^(NSError *error) {
-            DDLogError(@"%@ Failed to send Configuration response syncMessage with error: %@", self.logTag, error);
-        }];
+    [SSKEnvironment.shared.syncManager sendConfigurationSyncMessage];
 }
 
 @end

@@ -1,22 +1,23 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "Contact.h"
-#import "Cryptography.h"
+#import "OWSPrimaryStorage.h"
 #import "PhoneNumber.h"
+#import "SSKEnvironment.h"
 #import "SignalRecipient.h"
 #import "TSAccountManager.h"
-#import "TSStorageManager.h"
-
-@import Contacts;
+#import <Contacts/Contacts.h>
+#import <SignalCoreKit/Cryptography.h>
+#import <SignalCoreKit/NSString+OWS.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @interface Contact ()
 
-@property (readonly, nonatomic) NSMutableDictionary<NSString *, NSString *> *phoneNumberNameMap;
-@property (readonly, nonatomic) NSData *imageData;
+@property (nonatomic, readonly) NSMutableDictionary<NSString *, NSString *> *phoneNumberNameMap;
+@property (nonatomic, readonly) NSUInteger imageHash;
 
 @end
 
@@ -24,52 +25,35 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation Contact
 
-@synthesize fullName = _fullName;
 @synthesize comparableNameFirstLast = _comparableNameFirstLast;
 @synthesize comparableNameLastFirst = _comparableNameLastFirst;
-@synthesize image = _image;
 
 #if TARGET_OS_IOS
-- (instancetype)initWithFirstName:(nullable NSString *)firstName
-                         lastName:(nullable NSString *)lastName
-             userTextPhoneNumbers:(NSArray<NSString *> *)phoneNumbers
-                        imageData:(nullable NSData *)imageData
-                        contactID:(ABRecordID)record
+
+- (instancetype)initWithSystemContact:(CNContact *)cnContact
 {
     self = [super init];
     if (!self) {
         return self;
     }
 
-    _firstName = [self trimName:firstName];
-    _lastName = [self trimName:lastName];
-    _uniqueId = [self.class uniqueIdFromABRecordId:record];
-    _recordID = record;
-    _userTextPhoneNumbers = phoneNumbers;
-    _phoneNumberNameMap = [NSMutableDictionary new];
-    _parsedPhoneNumbers = [self parsedPhoneNumbersFromUserTextPhoneNumbers:phoneNumbers phoneNumberNameMap:@{}];
-    _imageData = imageData;
-    // Not using emails for old AB style contacts.
-    _emails = [NSMutableArray new];
-
-    return self;
-}
-
-- (instancetype)initWithSystemContact:(CNContact *)contact
-{
-    self = [super init];
-    if (!self) {
-        return self;
-    }
-
-    _cnContact = contact;
-    _firstName = [self trimName:contact.givenName];
-    _lastName = [self trimName:contact.familyName];
-    _uniqueId = contact.identifier;
+    _cnContactId = cnContact.identifier;
+    _firstName = cnContact.givenName.ows_stripped;
+    _lastName = cnContact.familyName.ows_stripped;
+    _fullName = [Contact formattedFullNameWithCNContact:cnContact];
 
     NSMutableArray<NSString *> *phoneNumbers = [NSMutableArray new];
     NSMutableDictionary<NSString *, NSString *> *phoneNumberNameMap = [NSMutableDictionary new];
-    for (CNLabeledValue *phoneNumberField in contact.phoneNumbers) {
+    const NSUInteger kMaxPhoneNumbersConsidered = 50;
+
+    NSArray<CNLabeledValue *> *consideredPhoneNumbers;
+    if (cnContact.phoneNumbers.count <= kMaxPhoneNumbersConsidered) {
+        consideredPhoneNumbers = cnContact.phoneNumbers;
+    } else {
+        OWSLogInfo(@"For perf, only considering the first %lu phone numbers for contact with many numbers.", (unsigned long)kMaxPhoneNumbersConsidered);
+        consideredPhoneNumbers = [cnContact.phoneNumbers subarrayWithRange:NSMakeRange(0, kMaxPhoneNumbersConsidered)];
+    }
+    for (CNLabeledValue *phoneNumberField in consideredPhoneNumbers) {
         if ([phoneNumberField.value isKindOfClass:[CNPhoneNumber class]]) {
             CNPhoneNumber *phoneNumber = (CNPhoneNumber *)phoneNumberField.value;
             [phoneNumbers addObject:phoneNumber.stringValue];
@@ -81,7 +65,7 @@ NS_ASSUME_NONNULL_BEGIN
                     = NSLocalizedString(@"PHONE_NUMBER_TYPE_WORK", @"Label for 'Work' phone numbers.");
             } else if ([phoneNumberField.label isEqualToString:CNLabelPhoneNumberiPhone]) {
                 phoneNumberNameMap[phoneNumber.stringValue]
-                    = NSLocalizedString(@"PHONE_NUMBER_TYPE_IPHONE", @"Label for 'IPhone' phone numbers.");
+                    = NSLocalizedString(@"PHONE_NUMBER_TYPE_IPHONE", @"Label for 'iPhone' phone numbers.");
             } else if ([phoneNumberField.label isEqualToString:CNLabelPhoneNumberMobile]) {
                 phoneNumberNameMap[phoneNumber.stringValue]
                     = NSLocalizedString(@"PHONE_NUMBER_TYPE_MOBILE", @"Label for 'Mobile' phone numbers.");
@@ -121,51 +105,44 @@ NS_ASSUME_NONNULL_BEGIN
         [self parsedPhoneNumbersFromUserTextPhoneNumbers:phoneNumbers phoneNumberNameMap:phoneNumberNameMap];
 
     NSMutableArray<NSString *> *emailAddresses = [NSMutableArray new];
-    for (CNLabeledValue *emailField in contact.emailAddresses) {
+    for (CNLabeledValue *emailField in cnContact.emailAddresses) {
         if ([emailField.value isKindOfClass:[NSString class]]) {
             [emailAddresses addObject:(NSString *)emailField.value];
         }
     }
     _emails = [emailAddresses copy];
 
-    if (contact.thumbnailImageData) {
-        _imageData = contact.thumbnailImageData;
+    NSData *_Nullable avatarData = [Contact avatarDataForCNContact:cnContact];
+    if (avatarData) {
+        NSUInteger hashValue = 0;
+        NSData *_Nullable hashData = [Cryptography computeSHA256Digest:avatarData truncatedToBytes:sizeof(hashValue)];
+        if (!hashData) {
+            OWSFailDebug(@"could not compute hash for avatar.");
+        }
+        [hashData getBytes:&hashValue length:sizeof(hashValue)];
+        _imageHash = hashValue;
+    } else {
+        _imageHash = 0;
     }
 
     return self;
 }
 
-- (nullable UIImage *)image
+- (NSString *)uniqueId
 {
-    if (_image) {
-        return _image;
-    }
+    return self.cnContactId;
+}
 
-    if (!self.imageData) {
++ (nullable Contact *)contactWithVCardData:(NSData *)data
+{
+    CNContact *_Nullable cnContact = [self cnContactWithVCardData:data];
+
+    if (!cnContact) {
+        OWSLogError(@"Could not parse vcard data.");
         return nil;
     }
 
-    _image = [UIImage imageWithData:self.imageData];
-    return _image;
-}
-
-- (NSString *)trimName:(NSString *)name
-{
-    return [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-}
-
-+ (NSString *)uniqueIdFromABRecordId:(ABRecordID)recordId
-{
-    return [NSString stringWithFormat:@"ABRecordId:%d", recordId];
-}
-
-+ (MTLPropertyStorage)storageBehaviorForPropertyWithKey:(NSString *)propertyKey
-{
-    if ([propertyKey isEqualToString:@"cnContact"] || [propertyKey isEqualToString:@"image"]) {
-        return MTLPropertyStorageTransitory;
-    } else {
-        return [super storageBehaviorForPropertyWithKey:propertyKey];
-    }
+    return [[self alloc] initWithSystemContact:cnContact];
 }
 
 #endif // TARGET_OS_IOS
@@ -174,7 +151,7 @@ NS_ASSUME_NONNULL_BEGIN
                                                     phoneNumberNameMap:(nullable NSDictionary<NSString *, NSString *> *)
                                                                            phoneNumberNameMap
 {
-    OWSAssert(self.phoneNumberNameMap);
+    OWSAssertDebug(self.phoneNumberNameMap);
 
     NSMutableDictionary<NSString *, PhoneNumber *> *parsedPhoneNumberMap = [NSMutableDictionary new];
     NSMutableArray<PhoneNumber *> *parsedPhoneNumbers = [NSMutableArray new];
@@ -191,18 +168,6 @@ NS_ASSUME_NONNULL_BEGIN
         }
     }
     return [parsedPhoneNumbers sortedArrayUsingSelector:@selector(compare:)];
-}
-
-- (NSString *)fullName {
-    if (_fullName == nil) {
-        if (ABPersonGetCompositeNameFormat() == kABPersonCompositeNameFormatFirstNameFirst) {
-            _fullName = [self combineLeftName:_firstName withRightName:_lastName usingSeparator:@" "];
-        } else {
-            _fullName = [self combineLeftName:_lastName withRightName:_firstName usingSeparator:@" "];
-        }
-    }
-    
-    return _fullName;
 }
 
 - (NSString *)comparableNameFirstLast {
@@ -255,8 +220,9 @@ NS_ASSUME_NONNULL_BEGIN
     __block NSMutableArray *result = [NSMutableArray array];
 
     for (PhoneNumber *number in [self.parsedPhoneNumbers sortedArrayUsingSelector:@selector(compare:)]) {
-        SignalRecipient *signalRecipient =
-            [SignalRecipient recipientWithTextSecureIdentifier:number.toE164 withTransaction:transaction];
+        SignalRecipient *_Nullable signalRecipient = [SignalRecipient registeredRecipientForRecipientId:number.toE164
+                                                                                        mustHaveDevices:YES
+                                                                                            transaction:transaction];
         if (signalRecipient) {
             [result addObject:signalRecipient];
         }
@@ -268,9 +234,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSArray<NSString *> *)textSecureIdentifiers {
     __block NSMutableArray *identifiers = [NSMutableArray array];
 
-    [TSStorageManager.dbReadConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
+    [OWSPrimaryStorage.dbReadConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
         for (PhoneNumber *number in self.parsedPhoneNumbers) {
-            if ([SignalRecipient recipientWithTextSecureIdentifier:number.toE164 withTransaction:transaction]) {
+            if ([SignalRecipient isRegisteredRecipient:number.toE164 transaction:transaction]) {
                 [identifiers addObject:number.toE164];
             }
         }
@@ -291,13 +257,17 @@ NS_ASSUME_NONNULL_BEGIN
     };
 }
 
++ (NSString *)formattedFullNameWithCNContact:(CNContact *)cnContact
+{
+    return [CNContactFormatter stringFromContact:cnContact style:CNContactFormatterStyleFullName].ows_stripped;
+}
+
 - (NSString *)nameForPhoneNumber:(NSString *)recipientId
 {
-    OWSAssert(recipientId.length > 0);
-    OWSAssert([self.textSecureIdentifiers containsObject:recipientId]);
+    OWSAssertDebug(recipientId.length > 0);
+    OWSAssertDebug([self.textSecureIdentifiers containsObject:recipientId]);
 
     NSString *value = self.phoneNumberNameMap[recipientId];
-    OWSAssert(value);
     if (!value) {
         return NSLocalizedString(@"PHONE_NUMBER_TYPE_UNKNOWN",
             @"Label used when we don't what kind of phone number it is (e.g. mobile/work/home).");
@@ -305,6 +275,20 @@ NS_ASSUME_NONNULL_BEGIN
     return value;
 }
 
++ (nullable NSData *)avatarDataForCNContact:(nullable CNContact *)cnContact
+{
+    if (cnContact.thumbnailImageData) {
+        return cnContact.thumbnailImageData.copy;
+    } else if (cnContact.imageData) {
+        // This only occurs when sharing a contact via the share extension
+        return cnContact.imageData.copy;
+    } else {
+        return nil;
+    }
+}
+
+// This method is used to de-bounce system contact fetch notifications
+// by checking for changes in the contact data.
 - (NSUInteger)hash
 {
     // base hash is some arbitrary number
@@ -312,15 +296,7 @@ NS_ASSUME_NONNULL_BEGIN
 
     hash = hash ^ self.fullName.hash;
 
-    // base thumbnailHash is some arbitrary number
-    NSUInteger thumbnailHash = 389201946;
-    if (self.cnContact.thumbnailImageData) {
-        NSData *thumbnailHashData =
-            [Cryptography computeSHA256Digest:self.cnContact.thumbnailImageData truncatedToBytes:sizeof(thumbnailHash)];
-        [thumbnailHashData getBytes:&thumbnailHash length:sizeof(thumbnailHash)];
-    }
-
-    hash = hash ^ thumbnailHash;
+    hash = hash ^ self.imageHash;
 
     for (PhoneNumber *phoneNumber in self.parsedPhoneNumbers) {
         hash = hash ^ phoneNumber.toE164.hash;
@@ -331,6 +307,123 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     return hash;
+}
+
+#pragma mark - CNContactConverters
+
++ (nullable CNContact *)cnContactWithVCardData:(NSData *)data
+{
+    OWSAssertDebug(data);
+
+    NSError *error;
+    NSArray<CNContact *> *_Nullable contacts = [CNContactVCardSerialization contactsWithData:data error:&error];
+    if (!contacts || error) {
+        OWSFailDebug(@"could not parse vcard: %@", error);
+        return nil;
+    }
+    if (contacts.count < 1) {
+        OWSFailDebug(@"empty vcard: %@", error);
+        return nil;
+    }
+    if (contacts.count > 1) {
+        OWSFailDebug(@"more than one contact in vcard: %@", error);
+    }
+    return contacts.firstObject;
+}
+
++ (CNContact *)mergeCNContact:(CNContact *)oldCNContact newCNContact:(CNContact *)newCNContact
+{
+    OWSAssertDebug(oldCNContact);
+    OWSAssertDebug(newCNContact);
+
+    Contact *oldContact = [[Contact alloc] initWithSystemContact:oldCNContact];
+
+    CNMutableContact *_Nullable mergedCNContact = [oldCNContact mutableCopy];
+    if (!mergedCNContact) {
+        OWSFailDebug(@"mergedCNContact was unexpectedly nil");
+        return [CNContact new];
+    }
+    
+    // Name
+    NSString *formattedFullName =  [self.class formattedFullNameWithCNContact:mergedCNContact];
+
+    // merged all or nothing - do not try to piece-meal merge.
+    if (formattedFullName.length == 0) {
+        mergedCNContact.namePrefix = newCNContact.namePrefix.ows_stripped;
+        mergedCNContact.givenName = newCNContact.givenName.ows_stripped;
+        mergedCNContact.middleName = newCNContact.middleName.ows_stripped;
+        mergedCNContact.familyName = newCNContact.familyName.ows_stripped;
+        mergedCNContact.nameSuffix = newCNContact.nameSuffix.ows_stripped;
+    }
+
+    if (mergedCNContact.organizationName.ows_stripped.length < 1) {
+        mergedCNContact.organizationName = newCNContact.organizationName.ows_stripped;
+    }
+
+    // Phone Numbers
+    NSSet<PhoneNumber *> *existingParsedPhoneNumberSet = [NSSet setWithArray:oldContact.parsedPhoneNumbers];
+    NSSet<NSString *> *existingUnparsedPhoneNumberSet = [NSSet setWithArray:oldContact.userTextPhoneNumbers];
+
+    NSMutableArray<CNLabeledValue<CNPhoneNumber *> *> *mergedPhoneNumbers = [mergedCNContact.phoneNumbers mutableCopy];
+    for (CNLabeledValue<CNPhoneNumber *> *labeledPhoneNumber in newCNContact.phoneNumbers) {
+        NSString *_Nullable unparsedPhoneNumber = labeledPhoneNumber.value.stringValue;
+        if ([existingUnparsedPhoneNumberSet containsObject:unparsedPhoneNumber]) {
+            // Skip phone number if "unparsed" form is a duplicate.
+            continue;
+        }
+        PhoneNumber *_Nullable parsedPhoneNumber = [PhoneNumber tryParsePhoneNumberFromUserSpecifiedText:labeledPhoneNumber.value.stringValue];
+        if (parsedPhoneNumber && [existingParsedPhoneNumberSet containsObject:parsedPhoneNumber]) {
+            // Skip phone number if "parsed" form is a duplicate.
+            continue;
+        }
+        [mergedPhoneNumbers addObject:labeledPhoneNumber];
+    }
+    mergedCNContact.phoneNumbers = mergedPhoneNumbers;
+    
+    // Emails
+    NSSet<NSString *> *existingEmailSet = [NSSet setWithArray:oldContact.emails];
+    NSMutableArray<CNLabeledValue<NSString *> *> *mergedEmailAddresses = [mergedCNContact.emailAddresses mutableCopy];
+    for (CNLabeledValue<NSString *> *labeledEmail in newCNContact.emailAddresses) {
+        NSString *normalizedValue = labeledEmail.value.ows_stripped;
+        if (![existingEmailSet containsObject:normalizedValue]) {
+            [mergedEmailAddresses addObject:labeledEmail];
+        }
+    }
+    mergedCNContact.emailAddresses = mergedEmailAddresses;
+    
+    // Address
+    // merged all or nothing - do not try to piece-meal merge.
+    if (mergedCNContact.postalAddresses.count == 0) {
+        mergedCNContact.postalAddresses = newCNContact.postalAddresses;
+    }
+
+    // Avatar
+    if (!mergedCNContact.imageData) {
+        mergedCNContact.imageData = newCNContact.imageData;
+    }
+
+    return [mergedCNContact copy];
+}
+
++ (nullable NSString *)localizedStringForCNLabel:(nullable NSString *)cnLabel
+{
+    if (cnLabel.length == 0) {
+        return nil;
+    }
+
+    NSString *_Nullable localizedLabel = [CNLabeledValue localizedStringForLabel:cnLabel];
+
+    // Docs for localizedStringForLabel say it returns:
+    // > The localized string if a Contacts framework defined label, otherwise just returns the label.
+    // But in practice, at least on iOS11, if the label is not one of CNContacts known labels (like CNLabelHome)
+    // kUnlocalizedStringLabel is returned, rather than the unadultered label.
+    NSString *const kUnlocalizedStringLabel = @"__ABUNLOCALIZEDSTRING";
+
+    if ([localizedLabel isEqual:kUnlocalizedStringLabel]) {
+        return cnLabel;
+    }
+
+    return localizedLabel;
 }
 
 @end

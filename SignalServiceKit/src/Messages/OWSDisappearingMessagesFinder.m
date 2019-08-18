@@ -1,13 +1,14 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSDisappearingMessagesFinder.h"
-#import "NSDate+OWS.h"
+#import "OWSPrimaryStorage.h"
+#import "TSIncomingMessage.h"
 #import "TSMessage.h"
 #import "TSOutgoingMessage.h"
-#import "TSStorageManager.h"
 #import "TSThread.h"
+#import <SignalCoreKit/NSDate+OWS.h>
 #import <YapDatabase/YapDatabase.h>
 #import <YapDatabase/YapDatabaseQuery.h>
 #import <YapDatabase/YapDatabaseSecondaryIndex.h>
@@ -23,7 +24,7 @@ static NSString *const OWSDisappearingMessageFinderExpiresAtIndex = @"index_mess
 - (NSArray<NSString *> *)fetchUnstartedExpiringMessageIdsInThread:(TSThread *)thread
                                                       transaction:(YapDatabaseReadTransaction *_Nonnull)transaction
 {
-    OWSAssert(transaction);
+    OWSAssertDebug(transaction);
 
     NSMutableArray<NSString *> *messageIds = [NSMutableArray new];
     NSString *formattedString = [NSString stringWithFormat:@"WHERE %@ = 0 AND %@ = \"%@\"",
@@ -41,9 +42,44 @@ static NSString *const OWSDisappearingMessageFinderExpiresAtIndex = @"index_mess
     return [messageIds copy];
 }
 
+- (NSArray<NSString *> *)fetchMessageIdsWhichFailedToStartExpiring:(YapDatabaseReadTransaction *_Nonnull)transaction
+{
+    OWSAssertDebug(transaction);
+
+    NSMutableArray<NSString *> *messageIds = [NSMutableArray new];
+    NSString *formattedString =
+        [NSString stringWithFormat:@"WHERE %@ = 0", OWSDisappearingMessageFinderExpiresAtColumn];
+
+    YapDatabaseQuery *query = [YapDatabaseQuery queryWithFormat:formattedString];
+    [[transaction ext:OWSDisappearingMessageFinderExpiresAtIndex]
+        enumerateKeysAndObjectsMatchingQuery:query
+                                  usingBlock:^void(NSString *collection, NSString *key, id object, BOOL *stop) {
+                                      if (![object isKindOfClass:[TSMessage class]]) {
+                                          OWSFailDebug(@"Object was unexpected class: %@", [object class]);
+                                          return;
+                                      }
+                                      
+                                      // We'll need to update if we ever support expiring other message types
+                                      OWSAssertDebug([object isKindOfClass:[TSOutgoingMessage class]] || [object isKindOfClass:[TSIncomingMessage class]]);
+                                      
+                                      TSMessage *message = (TSMessage *)object;
+                                      if ([message shouldStartExpireTimerWithTransaction:transaction]) {
+                                          if ([message isKindOfClass:[TSIncomingMessage class]]) {
+                                              TSIncomingMessage *incomingMessage = (TSIncomingMessage *)message;
+                                              if (!incomingMessage.wasRead) {
+                                                  return;
+                                              }
+                                          }
+                                          [messageIds addObject:key];
+                                      }
+                                  }];
+
+    return [messageIds copy];
+}
+
 - (NSArray<NSString *> *)fetchExpiredMessageIdsWithTransaction:(YapDatabaseReadTransaction *_Nonnull)transaction
 {
-    OWSAssert(transaction);
+    OWSAssertDebug(transaction);
 
     NSMutableArray<NSString *> *messageIds = [NSMutableArray new];
 
@@ -65,7 +101,7 @@ static NSString *const OWSDisappearingMessageFinderExpiresAtIndex = @"index_mess
 
 - (nullable NSNumber *)nextExpirationTimestampWithTransaction:(YapDatabaseReadTransaction *)transaction
 {
-    OWSAssert(transaction);
+    OWSAssertDebug(transaction);
 
     NSString *formattedString = [NSString stringWithFormat:@"WHERE %@ > 0 ORDER BY %@ ASC",
                                           OWSDisappearingMessageFinderExpiresAtColumn,
@@ -91,7 +127,7 @@ static NSString *const OWSDisappearingMessageFinderExpiresAtIndex = @"index_mess
                                              block:(void (^_Nonnull)(TSMessage *message))block
                                        transaction:(YapDatabaseReadTransaction *)transaction
 {
-    OWSAssert(transaction);
+    OWSAssertDebug(transaction);
 
     for (NSString *expiringMessageId in
         [self fetchUnstartedExpiringMessageIdsInThread:thread transaction:transaction]) {
@@ -99,8 +135,30 @@ static NSString *const OWSDisappearingMessageFinderExpiresAtIndex = @"index_mess
         if ([message isKindOfClass:[TSMessage class]]) {
             block(message);
         } else {
-            DDLogError(@"%@ unexpected object: %@", self.logTag, message);
+            OWSFailDebug(@"unexpected object: %@", [message class]);
         }
+    }
+}
+
+- (void)enumerateMessagesWhichFailedToStartExpiringWithBlock:(void (^_Nonnull)(TSMessage *message))block
+                                                 transaction:(YapDatabaseReadTransaction *)transaction
+{
+    OWSAssertDebug(transaction);
+
+    for (NSString *expiringMessageId in [self fetchMessageIdsWhichFailedToStartExpiring:transaction]) {
+
+        TSMessage *_Nullable message = [TSMessage fetchObjectWithUniqueID:expiringMessageId transaction:transaction];
+        if (![message isKindOfClass:[TSMessage class]]) {
+            OWSFailDebug(@"unexpected object: %@", [message class]);
+            continue;
+        }
+
+        if (![message shouldStartExpireTimerWithTransaction:transaction]) {
+            OWSFailDebug(@"object: %@ shouldn't expire.", message);
+            continue;
+        }
+
+        block(message);
     }
 }
 
@@ -111,7 +169,7 @@ static NSString *const OWSDisappearingMessageFinderExpiresAtIndex = @"index_mess
 - (NSArray<TSMessage *> *)fetchUnstartedExpiringMessagesInThread:(TSThread *)thread
                                                      transaction:(YapDatabaseReadTransaction *)transaction
 {
-    OWSAssert(transaction);
+    OWSAssertDebug(transaction);
 
     NSMutableArray<TSMessage *> *messages = [NSMutableArray new];
     [self enumerateUnstartedExpiringMessagesInThread:thread
@@ -127,7 +185,7 @@ static NSString *const OWSDisappearingMessageFinderExpiresAtIndex = @"index_mess
 - (void)enumerateExpiredMessagesWithBlock:(void (^_Nonnull)(TSMessage *message))block
                               transaction:(YapDatabaseReadTransaction *)transaction
 {
-    OWSAssert(transaction);
+    OWSAssertDebug(transaction);
 
     // Since we can't directly mutate the enumerated expired messages, we store only their ids in hopes of saving a
     // little memory and then enumerate the (larger) TSMessage objects one at a time.
@@ -136,7 +194,7 @@ static NSString *const OWSDisappearingMessageFinderExpiresAtIndex = @"index_mess
         if ([message isKindOfClass:[TSMessage class]]) {
             block(message);
         } else {
-            DDLogError(@"%@ unexpected object: %@", self.logTag, message);
+            OWSLogError(@"unexpected object: %@", message);
         }
     }
 }
@@ -147,7 +205,7 @@ static NSString *const OWSDisappearingMessageFinderExpiresAtIndex = @"index_mess
  */
 - (NSArray<TSMessage *> *)fetchExpiredMessagesWithTransaction:(YapDatabaseReadTransaction *)transaction
 {
-    OWSAssert(transaction);
+    OWSAssertDebug(transaction);
 
     NSMutableArray<TSMessage *> *messages = [NSMutableArray new];
     [self enumerateExpiredMessagesWithBlock:^(TSMessage *message) {
@@ -177,7 +235,7 @@ static NSString *const OWSDisappearingMessageFinderExpiresAtIndex = @"index_mess
             }
             TSMessage *message = (TSMessage *)object;
 
-            if (![message shouldStartExpireTimer:transaction]) {
+            if (![message shouldStartExpireTimerWithTransaction:transaction]) {
                 return;
             }
 
@@ -185,27 +243,25 @@ static NSString *const OWSDisappearingMessageFinderExpiresAtIndex = @"index_mess
             dict[OWSDisappearingMessageFinderThreadIdColumn] = message.uniqueThreadId;
         }];
 
-    return [[YapDatabaseSecondaryIndex alloc] initWithSetup:setup handler:handler];
+    return [[YapDatabaseSecondaryIndex alloc] initWithSetup:setup handler:handler versionTag:@"1"];
 }
 
+#ifdef DEBUG
 // Useful for tests, don't use in app startup path because it's slow.
-+ (void)blockingRegisterDatabaseExtensions:(TSStorageManager *)storageManager
++ (void)blockingRegisterDatabaseExtensions:(OWSStorage *)storage
 {
-    [storageManager registerExtension:[self indexDatabaseExtension]
-                             withName:OWSDisappearingMessageFinderExpiresAtIndex];
+    [storage registerExtension:[self indexDatabaseExtension] withName:OWSDisappearingMessageFinderExpiresAtIndex];
+}
+#endif
+
++ (NSString *)databaseExtensionName
+{
+    return OWSDisappearingMessageFinderExpiresAtIndex;
 }
 
-+ (void)asyncRegisterDatabaseExtensions:(TSStorageManager *)storageManager
++ (void)asyncRegisterDatabaseExtensions:(OWSStorage *)storage
 {
-    [storageManager asyncRegisterExtension:[self indexDatabaseExtension]
-                                  withName:OWSDisappearingMessageFinderExpiresAtIndex
-                           completionBlock:^(BOOL ready) {
-                               if (ready) {
-                                   DDLogDebug(@"%@ completed registering extension async.", self.logTag);
-                               } else {
-                                   DDLogError(@"%@ failed registering extension async.", self.logTag);
-                               }
-                           }];
+    [storage asyncRegisterExtension:[self indexDatabaseExtension] withName:OWSDisappearingMessageFinderExpiresAtIndex];
 }
 
 @end

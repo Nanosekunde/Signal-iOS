@@ -1,12 +1,14 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
-@class ContactsViewHelper;
 @class Contact;
+@class ContactsViewHelper;
 @class SignalAccount;
+@class TSThread;
+
 @protocol CNContactViewControllerDelegate;
 
 @protocol ContactsViewHelperDelegate <NSObject>
@@ -27,9 +29,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark -
 
-@class OWSContactsManager;
-@class OWSBlockingManager;
 @class CNContact;
+@class OWSBlockingManager;
+@class OWSContactsManager;
 
 @interface ContactsViewHelper : NSObject
 
@@ -44,8 +46,6 @@ NS_ASSUME_NONNULL_BEGIN
 // Useful to differentiate between having no signal accounts vs. haven't checked yet
 @property (nonatomic, readonly) BOOL hasUpdatedContactsAtLeastOnce;
 
-@property (nonatomic, readonly) NSArray<NSString *> *blockedPhoneNumbers;
-
 // Suitable when the user tries to perform an action which is not possible due to the user having
 // previously denied contact access.
 - (void)presentMissingContactAccessAlertControllerFromViewController:(UIViewController *)viewController;
@@ -54,23 +54,25 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithDelegate:(id<ContactsViewHelperDelegate>)delegate;
 
-- (nullable SignalAccount *)signalAccountForRecipientId:(NSString *)recipientId;
+- (nullable SignalAccount *)fetchSignalAccountForRecipientId:(NSString *)recipientId;
+- (SignalAccount *)fetchOrBuildSignalAccountForRecipientId:(NSString *)recipientId;
 
 // This method is faster than OWSBlockingManager but
 // is only safe to be called on the main thread.
 - (BOOL)isRecipientIdBlocked:(NSString *)recipientId;
+
+// This method is faster than OWSBlockingManager but
+// is only safe to be called on the main thread.
+- (BOOL)isThreadBlocked:(TSThread *)thread;
 
 // NOTE: This method uses a transaction.
 - (NSString *)localNumber;
 
 - (NSArray<SignalAccount *> *)signalAccountsMatchingSearchString:(NSString *)searchText;
 
+- (void)warmNonSignalContactsCacheAsync;
 - (NSArray<Contact *> *)nonSignalContactsMatchingSearchString:(NSString *)searchText;
 
-/**
- * NOTE: This method calls `[UIUtil applyDefaultSystemAppearence]`.
- * When using this method, you must call `[UIUtil applySignalAppearence]` once contact editing is finished;
- */
 - (void)presentContactViewControllerForRecipientId:(NSString *)recipientId
                                 fromViewController:(UIViewController<ContactEditingDelegate> *)fromViewController
                                    editImmediately:(BOOL)shouldEditImmediately;
@@ -80,6 +82,8 @@ NS_ASSUME_NONNULL_BEGIN
                                 fromViewController:(UIViewController<ContactEditingDelegate> *)fromViewController
                                    editImmediately:(BOOL)shouldEditImmediately
                             addToExistingCnContact:(CNContact *_Nullable)cnContact;
+
++ (void)presentMissingContactAccessAlertControllerFromViewController:(UIViewController *)viewController;
 
 @end
 

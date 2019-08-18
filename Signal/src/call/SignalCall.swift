@@ -1,17 +1,18 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import SignalServiceKit
 
-enum CallState: String {
+public enum CallState: String {
     case idle
     case dialing
     case answering
     case remoteRinging
     case localRinging
     case connected
+    case reconnecting
     case localFailure // terminal
     case localHangup // terminal
     case remoteHangup // terminal
@@ -36,12 +37,21 @@ protocol CallObserver: class {
  *
  * This class' state should only be accessed on the main queue.
  */
-@objc class SignalCall: NSObject {
-
-    let TAG = "[SignalCall]"
+@objc public class SignalCall: NSObject {
 
     var observers = [Weak<CallObserver>]()
+
+    @objc
     let remotePhoneNumber: String
+
+    var isTerminated: Bool {
+        switch state {
+        case .localFailure, .localHangup, .remoteHangup, .remoteBusy:
+            return true
+        case .idle, .dialing, .answering, .remoteRinging, .localRinging, .connected, .reconnecting:
+            return false
+        }
+    }
 
     // Signal Service identifier for this Call. Used to coordinate the call across remote clients.
     let signalingId: UInt64
@@ -49,6 +59,7 @@ protocol CallObserver: class {
     let direction: CallDirection
 
     // Distinguishes between calls locally, e.g. in CallKit
+    @objc
     let localId: UUID
 
     let thread: TSContactThread
@@ -75,15 +86,14 @@ protocol CallObserver: class {
     var state: CallState {
         didSet {
             AssertIsOnMainThread()
-            Logger.debug("\(TAG) state changed: \(oldValue) -> \(self.state) for call: \(self.identifiersForLogs)")
+            Logger.debug("state changed: \(oldValue) -> \(self.state) for call: \(self.identifiersForLogs)")
 
             // Update connectedDate
-            if self.state == .connected {
+            if case .connected = self.state {
+                // if it's the first time we've connected (not a reconnect)
                 if connectedDate == nil {
                     connectedDate = NSDate()
                 }
-            } else {
-                connectedDate = nil
             }
 
             updateCallRecordType()
@@ -98,7 +108,7 @@ protocol CallObserver: class {
         didSet {
             AssertIsOnMainThread()
 
-            Logger.debug("\(TAG) muted changed: \(oldValue) -> \(self.isMuted)")
+            Logger.debug("muted changed: \(oldValue) -> \(self.isMuted)")
 
             for observer in observers {
                 observer.value?.muteDidChange(call: self, isMuted: isMuted)
@@ -106,10 +116,12 @@ protocol CallObserver: class {
         }
     }
 
+    let audioActivity: AudioActivity
+
     var audioSource: AudioSource? = nil {
         didSet {
             AssertIsOnMainThread()
-            Logger.debug("\(TAG) audioSource changed: \(String(describing:oldValue)) -> \(String(describing: audioSource))")
+            Logger.debug("audioSource changed: \(String(describing: oldValue)) -> \(String(describing: audioSource))")
 
             for observer in observers {
                 observer.value?.audioSourceDidChange(call: self, audioSource: audioSource)
@@ -128,7 +140,7 @@ protocol CallObserver: class {
     var isOnHold = false {
         didSet {
             AssertIsOnMainThread()
-            Logger.debug("\(TAG) isOnHold changed: \(oldValue) -> \(self.isOnHold)")
+            Logger.debug("isOnHold changed: \(oldValue) -> \(self.isOnHold)")
 
             for observer in observers {
                 observer.value?.holdDidChange(call: self, isOnHold: isOnHold)
@@ -148,8 +160,8 @@ protocol CallObserver: class {
         self.signalingId = signalingId
         self.state = state
         self.remotePhoneNumber = remotePhoneNumber
-
         self.thread = TSContactThread.getOrCreateThread(contactId: remotePhoneNumber)
+        self.audioActivity = AudioActivity(audioDescription: "[SignalCall] with \(remotePhoneNumber)", behavior: .call)
     }
 
     // A string containing the three identifiers for this call.
@@ -179,7 +191,7 @@ protocol CallObserver: class {
     func removeObserver(_ observer: CallObserver) {
         AssertIsOnMainThread()
 
-        while let index = observers.index(where: { $0.value === observer }) {
+        while let index = observers.firstIndex(where: { $0.value === observer }) {
             observers.remove(at: index)
         }
     }
@@ -199,12 +211,12 @@ protocol CallObserver: class {
 
         // Mark incomplete calls as completed if call has connected.
         if state == .connected &&
-            callRecord.callType == RPRecentCallTypeOutgoingIncomplete {
-            callRecord.updateCallType(RPRecentCallTypeOutgoing)
+            callRecord.callType == .outgoingIncomplete {
+            callRecord.updateCallType(.outgoing)
         }
         if state == .connected &&
-            callRecord.callType == RPRecentCallTypeIncomingIncomplete {
-            callRecord.updateCallType(RPRecentCallTypeIncoming)
+            callRecord.callType == .incomingIncomplete {
+            callRecord.updateCallType(.incoming)
         }
     }
 
@@ -226,8 +238,6 @@ protocol CallObserver: class {
 
 fileprivate extension UInt64 {
     static func ows_random() -> UInt64 {
-        var random: UInt64 = 0
-        arc4random_buf(&random, MemoryLayout.size(ofValue: random))
-        return random
+        return Cryptography.randomUInt64()
     }
 }

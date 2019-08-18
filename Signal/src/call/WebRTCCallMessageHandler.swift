@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -7,60 +7,53 @@ import SignalServiceKit
 import SignalMessaging
 
 @objc(OWSWebRTCCallMessageHandler)
-class WebRTCCallMessageHandler: NSObject, OWSCallMessageHandler {
-
-    // MARK - Properties
-
-    let TAG = "[WebRTCCallMessageHandler]"
-
-    // MARK: Dependencies
-
-    let accountManager: AccountManager
-    let callService: CallService
-    let messageSender: MessageSender
+public class WebRTCCallMessageHandler: NSObject, OWSCallMessageHandler {
 
     // MARK: Initializers
 
-    required init(accountManager: AccountManager, callService: CallService, messageSender: MessageSender) {
-        self.accountManager = accountManager
-        self.callService = callService
-        self.messageSender = messageSender
-
+    @objc
+    public override init()
+    {
         super.init()
 
         SwiftSingletons.register(self)
     }
 
+    // MARK: - Dependencies
+
+    private var messageSender : MessageSender
+    {
+        return SSKEnvironment.shared.messageSender
+    }
+
+    private var accountManager : AccountManager
+    {
+        return AppEnvironment.shared.accountManager
+    }
+
+    private var callService : CallService
+    {
+        return AppEnvironment.shared.callService
+    }
+
     // MARK: - Call Handlers
 
-    public func receivedOffer(_ offer: OWSSignalServiceProtosCallMessageOffer, from callerId: String) {
+    public func receivedOffer(_ offer: SSKProtoCallMessageOffer, from callerId: String) {
         AssertIsOnMainThread()
-        guard offer.hasId() else {
-            owsFail("no callId in \(#function)")
-            return
-        }
 
         let thread = TSContactThread.getOrCreateThread(contactId: callerId)
         self.callService.handleReceivedOffer(thread: thread, callId: offer.id, sessionDescription: offer.sessionDescription)
     }
 
-    public func receivedAnswer(_ answer: OWSSignalServiceProtosCallMessageAnswer, from callerId: String) {
+    public func receivedAnswer(_ answer: SSKProtoCallMessageAnswer, from callerId: String) {
         AssertIsOnMainThread()
-        guard answer.hasId() else {
-            owsFail("no callId in \(#function)")
-            return
-        }
 
         let thread = TSContactThread.getOrCreateThread(contactId: callerId)
         self.callService.handleReceivedAnswer(thread: thread, callId: answer.id, sessionDescription: answer.sessionDescription)
     }
 
-    public func receivedIceUpdate(_ iceUpdate: OWSSignalServiceProtosCallMessageIceUpdate, from callerId: String) {
+    public func receivedIceUpdate(_ iceUpdate: SSKProtoCallMessageIceUpdate, from callerId: String) {
         AssertIsOnMainThread()
-        guard iceUpdate.hasId() else {
-            owsFail("no callId in \(#function)")
-            return
-        }
 
         let thread = TSContactThread.getOrCreateThread(contactId: callerId)
 
@@ -71,23 +64,15 @@ class WebRTCCallMessageHandler: NSObject, OWSCallMessageHandler {
         self.callService.handleRemoteAddedIceCandidate(thread: thread, callId: iceUpdate.id, sdp: iceUpdate.sdp, lineIndex: lineIndex, mid: iceUpdate.sdpMid)
     }
 
-    public func receivedHangup(_ hangup: OWSSignalServiceProtosCallMessageHangup, from callerId: String) {
+    public func receivedHangup(_ hangup: SSKProtoCallMessageHangup, from callerId: String) {
         AssertIsOnMainThread()
-        guard hangup.hasId() else {
-            owsFail("no callId in \(#function)")
-            return
-        }
 
         let thread = TSContactThread.getOrCreateThread(contactId: callerId)
         self.callService.handleRemoteHangup(thread: thread, callId: hangup.id)
     }
 
-    public func receivedBusy(_ busy: OWSSignalServiceProtosCallMessageBusy, from callerId: String) {
+    public func receivedBusy(_ busy: SSKProtoCallMessageBusy, from callerId: String) {
         AssertIsOnMainThread()
-        guard busy.hasId() else {
-            owsFail("no callId in \(#function)")
-            return
-        }
 
         let thread = TSContactThread.getOrCreateThread(contactId: callerId)
         self.callService.handleRemoteBusy(thread: thread, callId: busy.id)

@@ -1,16 +1,20 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSContactsOutputStream.h"
 #import "Contact.h"
-#import "Cryptography.h"
+#import "ContactsManagerProtocol.h"
 #import "MIMETypeUtil.h"
 #import "NSData+keyVersionByte.h"
+#import "OWSBlockingManager.h"
+#import "OWSDisappearingMessagesConfiguration.h"
 #import "OWSRecipientIdentity.h"
-#import "OWSSignalServiceProtos.pb.h"
 #import "SignalAccount.h"
-#import <ProtocolBuffers/CodedOutputStream.h>
+#import "TSContactThread.h"
+#import <SignalCoreKit/Cryptography.h>
+#import <SignalCoreKit/NSData+OWS.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -19,46 +23,81 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)writeSignalAccount:(SignalAccount *)signalAccount
          recipientIdentity:(nullable OWSRecipientIdentity *)recipientIdentity
             profileKeyData:(nullable NSData *)profileKeyData
+           contactsManager:(id<ContactsManagerProtocol>)contactsManager
+     conversationColorName:(NSString *)conversationColorName
+disappearingMessagesConfiguration:(nullable OWSDisappearingMessagesConfiguration *)disappearingMessagesConfiguration
 {
-    OWSAssert(signalAccount);
-    OWSAssert(signalAccount.contact);
+    OWSAssertDebug(signalAccount);
+    OWSAssertDebug(signalAccount.contact);
+    OWSAssertDebug(contactsManager);
 
-    OWSSignalServiceProtosContactDetailsBuilder *contactBuilder = [OWSSignalServiceProtosContactDetailsBuilder new];
+    SSKProtoContactDetailsBuilder *contactBuilder =
+        [SSKProtoContactDetails builderWithNumber:signalAccount.recipientId];
     [contactBuilder setName:signalAccount.contact.fullName];
-    [contactBuilder setNumber:signalAccount.recipientId];
+    [contactBuilder setColor:conversationColorName];
 
     if (recipientIdentity != nil) {
-        OWSSignalServiceProtosVerifiedBuilder *verifiedBuilder = [OWSSignalServiceProtosVerifiedBuilder new];
-        verifiedBuilder.destination = recipientIdentity.recipientId;
-        verifiedBuilder.identityKey = [recipientIdentity.identityKey prependKeyType];
-        verifiedBuilder.state = OWSVerificationStateToProtoState(recipientIdentity.verificationState);
-        contactBuilder.verifiedBuilder = verifiedBuilder;
+        SSKProtoVerified *_Nullable verified = BuildVerifiedProtoWithRecipientId(recipientIdentity.recipientId,
+            [recipientIdentity.identityKey prependKeyType],
+            recipientIdentity.verificationState,
+            0);
+        if (!verified) {
+            OWSLogError(@"could not build protobuf.");
+            return;
+        }
+        contactBuilder.verified = verified;
     }
 
-    NSData *avatarPng;
-    if (signalAccount.contact.image) {
-        OWSSignalServiceProtosContactDetailsAvatarBuilder *avatarBuilder =
-            [OWSSignalServiceProtosContactDetailsAvatarBuilder new];
+    UIImage *_Nullable rawAvatar = [contactsManager avatarImageForCNContactId:signalAccount.contact.cnContactId];
+    NSData *_Nullable avatarPng;
+    if (rawAvatar) {
+        avatarPng = UIImagePNGRepresentation(rawAvatar);
+        if (avatarPng) {
+            SSKProtoContactDetailsAvatarBuilder *avatarBuilder = [SSKProtoContactDetailsAvatar builder];
+            [avatarBuilder setContentType:OWSMimeTypeImagePng];
+            [avatarBuilder setLength:(uint32_t)avatarPng.length];
 
-        [avatarBuilder setContentType:OWSMimeTypeImagePng];
-        avatarPng = UIImagePNGRepresentation(signalAccount.contact.image);
-        [avatarBuilder setLength:(uint32_t)avatarPng.length];
-        [contactBuilder setAvatarBuilder:avatarBuilder];
+            NSError *error;
+            SSKProtoContactDetailsAvatar *_Nullable avatar = [avatarBuilder buildAndReturnError:&error];
+            if (error || !avatar) {
+                OWSLogError(@"could not build protobuf: %@", error);
+                return;
+            }
+            [contactBuilder setAvatar:avatar];
+        }
     }
 
     if (profileKeyData) {
-        OWSAssert(profileKeyData.length == kAES256_KeyByteLength);
+        OWSAssertDebug(profileKeyData.length == kAES256_KeyByteLength);
         [contactBuilder setProfileKey:profileKeyData];
     }
 
-    NSData *contactData = [[contactBuilder build] data];
+    // Always ensure the "expire timer" property is set so that desktop
+    // can easily distinguish between a modern client declaring "off" vs a
+    // legacy client "not specifying".
+    [contactBuilder setExpireTimer:0];
+
+    if (disappearingMessagesConfiguration && disappearingMessagesConfiguration.isEnabled) {
+        [contactBuilder setExpireTimer:disappearingMessagesConfiguration.durationSeconds];
+    }
+
+    if ([OWSBlockingManager.sharedManager isRecipientIdBlocked:signalAccount.recipientId]) {
+        [contactBuilder setBlocked:YES];
+    }
+
+    NSError *error;
+    NSData *_Nullable contactData = [contactBuilder buildSerializedDataAndReturnError:&error];
+    if (error || !contactData) {
+        OWSFailDebug(@"could not serialize protobuf: %@", error);
+        return;
+    }
 
     uint32_t contactDataLength = (uint32_t)contactData.length;
-    [self.delegateStream writeRawVarint32:contactDataLength];
-    [self.delegateStream writeRawData:contactData];
+    [self writeVariableLengthUInt32:contactDataLength];
+    [self writeData:contactData];
 
-    if (signalAccount.contact.image) {
-        [self.delegateStream writeRawData:avatarPng];
+    if (avatarPng) {
+        [self writeData:avatarPng];
     }
 }
 

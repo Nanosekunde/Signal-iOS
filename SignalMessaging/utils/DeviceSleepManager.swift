@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -18,8 +18,7 @@ import SignalServiceKit
 @objc
 public class DeviceSleepManager: NSObject {
 
-    let TAG = "[DeviceSleepManager]"
-
+    @objc
     public static let sharedInstance = DeviceSleepManager()
 
     private class SleepBlock: CustomDebugStringConvertible {
@@ -41,9 +40,9 @@ public class DeviceSleepManager: NSObject {
         SwiftSingletons.register(self)
 
         NotificationCenter.default.addObserver(self,
-                                               selector:#selector(didEnterBackground),
-                                               name:NSNotification.Name.UIApplicationDidEnterBackground,
-                                               object:nil)
+                                               selector: #selector(didEnterBackground),
+                                               name: NSNotification.Name.OWSApplicationDidEnterBackground,
+                                               object: nil)
     }
 
     deinit {
@@ -57,6 +56,7 @@ public class DeviceSleepManager: NSObject {
         ensureSleepBlocking()
     }
 
+    @objc
     public func addBlock(blockObject: NSObject) {
         AssertIsOnMainThread()
 
@@ -65,6 +65,7 @@ public class DeviceSleepManager: NSObject {
         ensureSleepBlocking()
     }
 
+    @objc
     public func removeBlock(blockObject: NSObject) {
         AssertIsOnMainThread()
 

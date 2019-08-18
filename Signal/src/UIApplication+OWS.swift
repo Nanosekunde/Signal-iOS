@@ -1,30 +1,33 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 
-extension UIApplication {
+@objc public extension UIApplication {
 
     var frontmostViewControllerIgnoringAlerts: UIViewController? {
-        return findFrontmostViewController(ignoringAlerts:true)
+        return findFrontmostViewController(ignoringAlerts: true)
     }
 
     var frontmostViewController: UIViewController? {
-        return findFrontmostViewController(ignoringAlerts:false)
+        return findFrontmostViewController(ignoringAlerts: false)
     }
 
     internal func findFrontmostViewController(ignoringAlerts: Bool) -> UIViewController? {
-        let window = UIApplication.shared.keyWindow
-        guard let viewController = window!.rootViewController else {
-            owsFail("\(self.logTag) in \(#function) Missing root view controller.")
+        guard let window = CurrentAppContext().mainWindow else {
+            return nil
+        }
+        Logger.error("findFrontmostViewController: \(window)")
+        guard let viewController = window.rootViewController else {
+            owsFailDebug("Missing root view controller.")
             return nil
         }
         return viewController.findFrontmostViewController(ignoringAlerts)
     }
 
     func openSystemSettings() {
-        openURL(URL(string: UIApplicationOpenSettingsURLString)!)
+        openURL(URL(string: UIApplication.openSettingsURLString)!)
     }
 
 }

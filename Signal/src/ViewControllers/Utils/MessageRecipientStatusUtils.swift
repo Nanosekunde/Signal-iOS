@@ -1,210 +1,169 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import SignalServiceKit
 import SignalMessaging
 
-@objc enum MessageRecipientStatus: Int {
+@objc public enum MessageReceiptStatus: Int {
     case uploading
     case sending
     case sent
     case delivered
     case read
     case failed
+    case skipped
 }
 
-// Our per-recipient status messages are "biased towards success"
-// and reflect the most successful known state for that recipient.
-//
-// Our per-message status messages are "biased towards failure"
-// and reflect the least successful known state for that message.
-//
-// Why?
-//
-// When showing the per-recipient status, we want to show the message
-// as "read" even if delivery failed to another recipient of the same
-// message.
-//
-// When showing the per-message status, we want to show the message
-// as "failed" if delivery failed to any recipient, even if another 
-// receipient has read the message.
-// 
-// Note also that for legacy reasons we have redundant and possibly
-// conflicting state.  Examples:
-//
-// * We could have an entry in the recipientReadMap for a message
-//   that has no entries in its recipientDeliveryMap.
-// * We could have an entry in the recipientReadMap or recipientDeliveryMap
-//   for a message whose status is "attempting out" or "unsent".
-// * We could have a message whose wasDelivered property is false but
-//   which has entries in its recipientDeliveryMap or recipientReadMap.
-// * Etc.
-//
-// To resolve this ambiguity, we apply a "bias" towards success or
-// failure.
-class MessageRecipientStatusUtils: NSObject {
+@objc
+public class MessageRecipientStatusUtils: NSObject {
     // MARK: Initializers
 
     @available(*, unavailable, message:"do not instantiate this class.")
     private override init() {
     }
 
-    // This method is per-recipient and "biased towards success".
-    // See comments above.
+    // This method is per-recipient.
+    @objc
     public class func recipientStatus(outgoingMessage: TSOutgoingMessage,
-                                      recipientId: String,
-                                      referenceView: UIView) -> MessageRecipientStatus {
-        let (messageRecipientStatus, _) = recipientStatusAndStatusMessage(outgoingMessage: outgoingMessage,
-                                                                                     recipientId: recipientId,
-                                                                                     referenceView: referenceView)
-        return messageRecipientStatus
+            recipientState: TSOutgoingMessageRecipientState) -> MessageReceiptStatus {
+        let (messageReceiptStatus, _, _) = recipientStatusAndStatusMessage(outgoingMessage: outgoingMessage,
+                                                                             recipientState: recipientState)
+        return messageReceiptStatus
     }
 
-    // This method is per-recipient and "biased towards success".
-    // See comments above.
-    public class func statusMessage(outgoingMessage: TSOutgoingMessage,
-                                      recipientId: String,
-                                      referenceView: UIView) -> String {
-        let (_, statusMessage) = recipientStatusAndStatusMessage(outgoingMessage: outgoingMessage,
-                                                                                     recipientId: recipientId,
-                                                                                     referenceView: referenceView)
-        return statusMessage
+    // This method is per-recipient.
+    @objc
+    public class func shortStatusMessage(outgoingMessage: TSOutgoingMessage,
+        recipientState: TSOutgoingMessageRecipientState) -> String {
+        let (_, shortStatusMessage, _) = recipientStatusAndStatusMessage(outgoingMessage: outgoingMessage,
+                                                                         recipientState: recipientState)
+        return shortStatusMessage
     }
 
-    // This method is per-recipient and "biased towards success".  
-    // See comments above.
-    public class func recipientStatusAndStatusMessage(outgoingMessage: TSOutgoingMessage,
-                                                      recipientId: String,
-                                                      referenceView: UIView) -> (MessageRecipientStatus, String) {
-        // Legacy messages don't have "recipient read" state or "per-recipient delivery" state,
-        // so we fall back to `TSOutgoingMessageState` which is not per-recipient and therefore
-        // might be misleading.
+    // This method is per-recipient.
+    @objc
+    public class func longStatusMessage(outgoingMessage: TSOutgoingMessage,
+        recipientState: TSOutgoingMessageRecipientState) -> String {
+        let (_, _, longStatusMessage) = recipientStatusAndStatusMessage(outgoingMessage: outgoingMessage,
+                                                                        recipientState: recipientState)
+        return longStatusMessage
+    }
 
-        let recipientReadMap = outgoingMessage.recipientReadMap
-        if let readTimestamp = recipientReadMap[recipientId] {
-            assert(outgoingMessage.messageState == .sentToService)
-            let statusMessage = NSLocalizedString("MESSAGE_STATUS_READ", comment:"message footer for read messages").rtlSafeAppend(" ", referenceView:referenceView)
-                .rtlSafeAppend(
-                    DateUtil.formatPastTimestampRelativeToNow(readTimestamp.uint64Value), referenceView:referenceView)
-            return (.read, statusMessage)
-        }
+    // This method is per-recipient.
+    class func recipientStatusAndStatusMessage(outgoingMessage: TSOutgoingMessage,
+        recipientState: TSOutgoingMessageRecipientState) -> (status: MessageReceiptStatus, shortStatusMessage: String, longStatusMessage: String) {
 
-        let recipientDeliveryMap = outgoingMessage.recipientDeliveryMap
-        if let deliveryTimestamp = recipientDeliveryMap[recipientId] {
-            assert(outgoingMessage.messageState == .sentToService)
-            let statusMessage = NSLocalizedString("MESSAGE_STATUS_DELIVERED",
-                                                  comment:"message status for message delivered to their recipient.").rtlSafeAppend(" ", referenceView:referenceView)
-                .rtlSafeAppend(
-                    DateUtil.formatPastTimestampRelativeToNow(deliveryTimestamp.uint64Value), referenceView:referenceView)
-            return (.delivered, statusMessage)
-        }
+        switch recipientState.state {
+        case .failed:
+            let shortStatusMessage = NSLocalizedString("MESSAGE_STATUS_FAILED_SHORT", comment: "status message for failed messages")
+            let longStatusMessage = NSLocalizedString("MESSAGE_STATUS_FAILED", comment: "status message for failed messages")
+            return (status:.failed, shortStatusMessage:shortStatusMessage, longStatusMessage:longStatusMessage)
+        case .sending:
+            if outgoingMessage.hasAttachments() {
+                assert(outgoingMessage.messageState == .sending)
 
-        if outgoingMessage.wasDelivered {
-            let statusMessage = NSLocalizedString("MESSAGE_STATUS_DELIVERED",
-                                                  comment:"message status for message delivered to their recipient.")
-            return (.delivered, statusMessage)
-        }
+                let statusMessage = NSLocalizedString("MESSAGE_STATUS_UPLOADING",
+                                                      comment: "status message while attachment is uploading")
+                return (status:.uploading, shortStatusMessage:statusMessage, longStatusMessage:statusMessage)
+            } else {
+                assert(outgoingMessage.messageState == .sending)
 
-        if outgoingMessage.messageState == .unsent {
-            let statusMessage = NSLocalizedString("MESSAGE_STATUS_FAILED", comment:"message footer for failed messages")
-            return (.failed, statusMessage)
-        } else if outgoingMessage.messageState == .sentToService ||
-            outgoingMessage.wasSent(toRecipient:recipientId) {
+                let statusMessage = NSLocalizedString("MESSAGE_STATUS_SENDING",
+                                                      comment: "message status while message is sending.")
+                return (status:.sending, shortStatusMessage:statusMessage, longStatusMessage:statusMessage)
+            }
+        case .sent:
+            if let readTimestamp = recipientState.readTimestamp {
+                let timestampString = DateUtil.formatPastTimestampRelativeToNow(readTimestamp.uint64Value)
+                let shortStatusMessage = timestampString
+                let longStatusMessage = NSLocalizedString("MESSAGE_STATUS_READ", comment: "status message for read messages").rtlSafeAppend(" ")
+                    .rtlSafeAppend(timestampString)
+                return (status:.read, shortStatusMessage:shortStatusMessage, longStatusMessage:longStatusMessage)
+            }
+            if let deliveryTimestamp = recipientState.deliveryTimestamp {
+                let timestampString = DateUtil.formatPastTimestampRelativeToNow(deliveryTimestamp.uint64Value)
+                let shortStatusMessage = timestampString
+                let longStatusMessage = NSLocalizedString("MESSAGE_STATUS_DELIVERED",
+                                                          comment: "message status for message delivered to their recipient.").rtlSafeAppend(" ")
+                    .rtlSafeAppend(timestampString)
+                return (status:.delivered, shortStatusMessage:shortStatusMessage, longStatusMessage:longStatusMessage)
+            }
             let statusMessage =
                 NSLocalizedString("MESSAGE_STATUS_SENT",
-                                  comment:"message footer for sent messages")
-            return (.sent, statusMessage)
-        } else if outgoingMessage.hasAttachments() {
-            assert(outgoingMessage.messageState == .attemptingOut)
-
-            let statusMessage = NSLocalizedString("MESSAGE_STATUS_UPLOADING",
-                                                  comment:"message footer while attachment is uploading")
-            return (.uploading, statusMessage)
-        } else {
-            assert(outgoingMessage.messageState == .attemptingOut)
-
-            let statusMessage = NSLocalizedString("MESSAGE_STATUS_SENDING",
-                                                  comment:"message status while message is sending.")
-            return (.sending, statusMessage)
+                                  comment: "status message for sent messages")
+            return (status:.sent, shortStatusMessage:statusMessage, longStatusMessage:statusMessage)
+        case .skipped:
+            let statusMessage = NSLocalizedString("MESSAGE_STATUS_RECIPIENT_SKIPPED",
+                                                  comment: "message status if message delivery to a recipient is skipped. We skip delivering group messages to users who have left the group or unregistered their Signal account.")
+            return (status:.skipped, shortStatusMessage:statusMessage, longStatusMessage:statusMessage)
         }
     }
 
-    // This method is per-message and "biased towards failure".
-    // See comments above.
-    public class func statusMessage(outgoingMessage: TSOutgoingMessage,
-                                    referenceView: UIView) -> String {
+    // This method is per-message.
+    internal class func receiptStatusAndMessage(outgoingMessage: TSOutgoingMessage) -> (status: MessageReceiptStatus, message: String) {
 
         switch outgoingMessage.messageState {
-        case .unsent:
-            return NSLocalizedString("MESSAGE_STATUS_FAILED", comment:"message footer for failed messages")
-        case .attemptingOut:
+        case .failed:
+            // Use the "long" version of this message here.
+            return (.failed, NSLocalizedString("MESSAGE_STATUS_FAILED", comment: "status message for failed messages"))
+        case .sending:
             if outgoingMessage.hasAttachments() {
-                return NSLocalizedString("MESSAGE_STATUS_UPLOADING",
-                                         comment:"message footer while attachment is uploading")
+                return (.uploading, NSLocalizedString("MESSAGE_STATUS_UPLOADING",
+                                         comment: "status message while attachment is uploading"))
             } else {
-                return NSLocalizedString("MESSAGE_STATUS_SENDING",
-                                         comment:"message status while message is sending.")
+                return (.sending, NSLocalizedString("MESSAGE_STATUS_SENDING",
+                                         comment: "message status while message is sending."))
             }
-        case .sentToService:
-            let recipientReadMap = outgoingMessage.recipientReadMap
-            if recipientReadMap.count > 0 {
-                return NSLocalizedString("MESSAGE_STATUS_READ", comment:"message footer for read messages")
+        case .sent:
+            if outgoingMessage.readRecipientIds().count > 0 {
+                return (.read, NSLocalizedString("MESSAGE_STATUS_READ", comment: "status message for read messages"))
             }
-
-            let recipientDeliveryMap = outgoingMessage.recipientDeliveryMap
-            if recipientDeliveryMap.count > 0 {
-                return NSLocalizedString("MESSAGE_STATUS_DELIVERED",
-                                         comment:"message status for message delivered to their recipient.")
+            if outgoingMessage.wasDeliveredToAnyRecipient {
+                return (.delivered, NSLocalizedString("MESSAGE_STATUS_DELIVERED",
+                                         comment: "message status for message delivered to their recipient."))
             }
-
-            if outgoingMessage.wasDelivered {
-                return NSLocalizedString("MESSAGE_STATUS_DELIVERED",
-                                         comment:"message status for message delivered to their recipient.")
-            }
-
-            return NSLocalizedString("MESSAGE_STATUS_SENT",
-                                     comment:"message footer for sent messages")
+            return (.sent, NSLocalizedString("MESSAGE_STATUS_SENT",
+                                     comment: "status message for sent messages"))
         default:
-            owsFail("Message has unexpected status: \(outgoingMessage.messageState).")
-            return NSLocalizedString("MESSAGE_STATUS_SENT",
-                                     comment:"message footer for sent messages")
+            owsFailDebug("Message has unexpected status: \(outgoingMessage.messageState).")
+            return (.sent, NSLocalizedString("MESSAGE_STATUS_SENT",
+                                     comment: "status message for sent messages"))
         }
     }
 
-    // This method is per-message and "biased towards failure".
-    // See comments above.
-    public class func recipientStatus(outgoingMessage: TSOutgoingMessage) -> MessageRecipientStatus {
-        switch outgoingMessage.messageState {
-        case .unsent:
-            return .failed
-        case .attemptingOut:
-            if outgoingMessage.hasAttachments() {
-                return .uploading
-            } else {
-                return .sending
-            }
-        case .sentToService:
-            let recipientReadMap = outgoingMessage.recipientReadMap
-            if recipientReadMap.count > 0 {
-                return .read
-            }
+    // This method is per-message.
+    @objc
+    public class func receiptMessage(outgoingMessage: TSOutgoingMessage) -> String {
+        let (_, message ) = receiptStatusAndMessage(outgoingMessage: outgoingMessage)
+        return message
+    }
 
-            let recipientDeliveryMap = outgoingMessage.recipientDeliveryMap
-            if recipientDeliveryMap.count > 0 {
-                return .delivered
-            }
+    // This method is per-message.
+    @objc
+    public class func recipientStatus(outgoingMessage: TSOutgoingMessage) -> MessageReceiptStatus {
+        let (status, _ ) = receiptStatusAndMessage(outgoingMessage: outgoingMessage)
+        return status
+    }
 
-            if outgoingMessage.wasDelivered {
-                return .delivered
-            }
-
-            return .sent
-        default:
-            owsFail("Message has unexpected status: \(outgoingMessage.messageState).")
-
-            return .sent
+    @objc
+    public class func description(forMessageReceiptStatus value: MessageReceiptStatus) -> String {
+        switch(value) {
+        case .read:
+            return "read"
+        case .uploading:
+            return "uploading"
+        case .delivered:
+            return "delivered"
+        case .sent:
+            return "sent"
+        case .sending:
+            return "sending"
+        case .failed:
+            return "failed"
+        case .skipped:
+            return "skipped"
         }
     }
 }

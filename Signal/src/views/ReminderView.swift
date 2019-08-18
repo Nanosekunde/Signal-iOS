@@ -1,19 +1,16 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 
 class ReminderView: UIView {
 
-    let TAG = "[ReminderView]"
     let label = UILabel()
 
-    let defaultTapAction = {
-        Logger.debug("[ReminderView] tapped.")
-    }
+    typealias Action = () -> Void
 
-    var tapAction: () -> Void
+    var tapAction: Action?
 
     var text: String? {
         get {
@@ -25,65 +22,99 @@ class ReminderView: UIView {
         }
     }
 
-    required init?(coder: NSCoder) {
-        self.tapAction = defaultTapAction
+    enum ReminderViewMode {
+        // Nags are urgent interactive prompts, bidding for the user's attention.
+        case nag
+        // Explanations are not interactive or urgent.
+        case explanation
+    }
+    let mode: ReminderViewMode
 
-        super.init(coder: coder)
-
-        setupSubviews()
+    @available(*, unavailable, message:"use other constructor instead.")
+    required init?(coder aDecoder: NSCoder) {
+        notImplemented()
     }
 
+    @available(*, unavailable, message:"use other constructor instead.")
     override init(frame: CGRect) {
-        self.tapAction = defaultTapAction
+        notImplemented()
+    }
 
-        super.init(frame: frame)
+    init(mode: ReminderViewMode,
+         text: String, tapAction: Action?) {
+        self.mode = mode
+        self.tapAction = tapAction
+
+        super.init(frame: .zero)
+
+        self.text = text
 
         setupSubviews()
     }
 
-    convenience init(text: String, tapAction: @escaping () -> Void) {
-        self.init(frame: .zero)
-        self.text = text
-        self.tapAction = tapAction
+    @objc public class func nag(text: String, tapAction: Action?) -> ReminderView {
+        return ReminderView(mode: .nag, text: text, tapAction: tapAction)
+    }
+
+    @objc public class func explanation(text: String) -> ReminderView {
+        return ReminderView(mode: .explanation, text: text, tapAction: nil)
     }
 
     func setupSubviews() {
-        self.backgroundColor = UIColor.ows_reminderYellow
+        let textColor: UIColor
+        let iconColor: UIColor
+        switch mode {
+        case .nag:
+            self.backgroundColor = UIColor.ows_reminderYellow
+            textColor = UIColor.ows_gray90
+            iconColor = UIColor.ows_gray60
+        case .explanation:
+            // TODO: Theme, review with design.
+            self.backgroundColor = Theme.offBackgroundColor
+            textColor = Theme.primaryColor
+            iconColor = Theme.secondaryColor
+        }
         self.clipsToBounds = true
 
         let tapGesture = UITapGestureRecognizer(target: self, action: #selector(handleTap(gestureRecognizer:)))
         self.addGestureRecognizer(tapGesture)
 
-        let container = UIView()
+        let container = UIStackView()
+        container.axis = .horizontal
+        container.alignment = .center
+        container.isLayoutMarginsRelativeArrangement = true
 
         self.addSubview(container)
-        container.autoPinWidthToSuperview(withMargin: 16)
-        container.autoPinHeightToSuperview(withMargin: 16)
+        container.layoutMargins = UIEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
+        container.ows_autoPinToSuperviewEdges()
 
         // Label
-        label.font = UIFont.ows_regularFont(withSize: 14)
-        container.addSubview(label)
+        label.font = UIFont.ows_dynamicTypeSubheadline
+        container.addArrangedSubview(label)
+        label.textColor = textColor
         label.numberOfLines = 0
         label.lineBreakMode = .byWordWrapping
-        label.autoPinEdge(toSuperviewEdge: .top)
-        label.autoPinEdge(toSuperviewEdge: .left)
-        label.autoPinEdge(toSuperviewEdge: .bottom)
-        label.textColor = UIColor.black.withAlphaComponent(0.9)
 
-        // Icon
-        let iconImage = #imageLiteral(resourceName: "system_disclosure_indicator").withRenderingMode(.alwaysTemplate)
-        let iconView = UIImageView(image: iconImage)
-        iconView.contentMode = .scaleAspectFit
-        iconView.tintColor = UIColor.black.withAlphaComponent(0.6)
-        container.addSubview(iconView)
-
-        iconView.autoPinEdge(toSuperviewEdge: .right)
-        iconView.autoPinEdge(.left, to: .right, of: label, withOffset: 28)
-        iconView.autoVCenterInSuperview()
-        iconView.autoSetDimension(.width, toSize: 13)
+        // Show the disclosure indicator if this reminder has a tap action.
+        if tapAction != nil {
+            // Icon
+            let iconName = (CurrentAppContext().isRTL ? "system_disclosure_indicator_rtl" : "system_disclosure_indicator")
+            guard let iconImage = UIImage(named: iconName) else {
+                owsFailDebug("missing icon.")
+                return
+            }
+            let iconView = UIImageView(image: iconImage.withRenderingMode(.alwaysTemplate))
+            iconView.contentMode = .scaleAspectFit
+            iconView.tintColor = iconColor
+            iconView.autoSetDimension(.width, toSize: 13)
+            container.addArrangedSubview(iconView)
+        }
     }
 
-    func handleTap(gestureRecognizer: UIGestureRecognizer) {
-        tapAction()
+    @objc func handleTap(gestureRecognizer: UIGestureRecognizer) {
+        guard gestureRecognizer.state == .recognized else {
+            return
+        }
+        tapAction?()
     }
 }

@@ -1,22 +1,16 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
-typedef NS_ENUM(NSInteger, ConversationViewLayoutAlignment) {
-    // We use incoming/outgoing, not left/right to support RTL.
-    ConversationViewLayoutAlignment_Incoming,
-    ConversationViewLayoutAlignment_Outgoing,
-    ConversationViewLayoutAlignment_FullWidth,
-    ConversationViewLayoutAlignment_Center,
-};
+@class ConversationStyle;
 
 @protocol ConversationViewLayoutItem <NSObject>
 
-- (CGSize)cellSizeForViewWidth:(int)viewWidth contentWidth:(int)contentWidth;
+- (CGSize)cellSize;
 
-- (ConversationViewLayoutAlignment)layoutAlignment;
+- (CGFloat)vSpacingWithPreviousLayoutItem:(id<ConversationViewLayoutItem>)previousLayoutItem;
 
 @end
 
@@ -37,8 +31,13 @@ typedef NS_ENUM(NSInteger, ConversationViewLayoutAlignment) {
 @interface ConversationViewLayout : UICollectionViewLayout
 
 @property (nonatomic, weak) id<ConversationViewLayoutDelegate> delegate;
+@property (nonatomic, readonly) BOOL hasLayout;
+@property (nonatomic, readonly) BOOL hasEverHadLayout;
+@property (nonatomic, readonly) ConversationStyle *conversationStyle;
 
-@property (nonatomic, readonly) int contentWidth;
+- (instancetype)init NS_UNAVAILABLE;
+
+- (instancetype)initWithConversationStyle:(ConversationStyle *)conversationStyle;
 
 @end
 

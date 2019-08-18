@@ -1,29 +1,46 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSDatabaseMigration.h"
-#import <SignalServiceKit/TSStorageManager.h>
+#import <SignalServiceKit/OWSPrimaryStorage.h>
+#import <SignalServiceKit/SSKEnvironment.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSDatabaseMigration
 
-- (instancetype)initWithStorageManager:(TSStorageManager *)storageManager
+#pragma mark - Dependencies
+
+- (OWSPrimaryStorage *)primaryStorage
+{
+    OWSAssertDebug(SSKEnvironment.shared.primaryStorage);
+
+    return SSKEnvironment.shared.primaryStorage;
+}
+
+#pragma mark -
+
+- (void)saveWithTransaction:(YapDatabaseReadWriteTransaction *)transaction
+{
+    OWSLogInfo(@"marking migration as complete.");
+
+    [super saveWithTransaction:transaction];
+}
+
+- (instancetype)init
 {
     self = [super initWithUniqueId:[self.class migrationId]];
     if (!self) {
         return self;
     }
 
-    _storageManager = storageManager;
-
     return self;
 }
 
 + (MTLPropertyStorage)storageBehaviorForPropertyWithKey:(NSString *)propertyKey
 {
-    if ([propertyKey isEqualToString:@"storageManager"]) {
+    if ([propertyKey isEqualToString:@"primaryStorage"]) {
         return MTLPropertyStorageNone;
     } else {
         return [super storageBehaviorForPropertyWithKey:propertyKey];
@@ -32,10 +49,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (NSString *)migrationId
 {
-    @throw [NSException
-        exceptionWithName:NSInternalInconsistencyException
-                   reason:[NSString stringWithFormat:@"Must override %@ in subclass", NSStringFromSelector(_cmd)]
-                 userInfo:nil];
+    OWSAbstractMethod();
+    return @"";
 }
 
 + (NSString *)collection
@@ -46,23 +61,50 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)runUpWithTransaction:(YapDatabaseReadWriteTransaction *)transaction
 {
-    @throw [NSException
-        exceptionWithName:NSInternalInconsistencyException
-                   reason:[NSString stringWithFormat:@"Must override %@ in subclass", NSStringFromSelector(_cmd)]
-                 userInfo:nil];
+    OWSAbstractMethod();
 }
 
-- (void)runUp
+- (void)runUpWithCompletion:(OWSDatabaseMigrationCompletion)completion
 {
-    [self.storageManager.newDatabaseConnection
+    OWSAssertDebug(completion);
+
+    OWSDatabaseConnection *dbConnection = (OWSDatabaseConnection *)self.primaryStorage.newDatabaseConnection;
+
+    [dbConnection
         asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
             [self runUpWithTransaction:transaction];
         }
         completionBlock:^{
-            DDLogInfo(@"Completed migration %@", self.uniqueId);
+            OWSLogInfo(@"Completed migration %@", self.uniqueId);
             [self save];
+
+            completion();
         }];
 }
+
+#pragma mark - Database Connections
+
+#ifdef DEBUG
++ (YapDatabaseConnection *)dbReadConnection
+{
+    return self.dbReadWriteConnection;
+}
+
++ (YapDatabaseConnection *)dbReadWriteConnection
+{
+    return SSKEnvironment.shared.migrationDBConnection;
+}
+
+- (YapDatabaseConnection *)dbReadConnection
+{
+    return OWSDatabaseMigration.dbReadConnection;
+}
+
+- (YapDatabaseConnection *)dbReadWriteConnection
+{
+    return OWSDatabaseMigration.dbReadWriteConnection;
+}
+#endif
 
 @end
 

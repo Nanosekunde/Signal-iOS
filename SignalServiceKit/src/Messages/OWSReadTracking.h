@@ -1,6 +1,8 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
+
+NS_ASSUME_NONNULL_BEGIN
 
 @class YapDatabaseReadWriteTransaction;
 
@@ -15,16 +17,20 @@
  */
 @property (nonatomic, readonly, getter=wasRead) BOOL read;
 
-@property (nonatomic, readonly) uint64_t timestampForSorting;
+@property (nonatomic, readonly) uint64_t expireStartedAt;
+@property (nonatomic, readonly) uint64_t sortId;
 @property (nonatomic, readonly) NSString *uniqueThreadId;
+
 
 - (BOOL)shouldAffectUnreadCounts;
 
 /**
- * Used for *responding* to a remote read receipt or in response to user activity.
+ * Used both for *responding* to a remote read receipt and in response to the local user's activity.
  */
-- (void)markAsReadWithTransaction:(YapDatabaseReadWriteTransaction *)transaction
-                  sendReadReceipt:(BOOL)sendReadReceipt
-                 updateExpiration:(BOOL)updateExpiration;
+- (void)markAsReadAtTimestamp:(uint64_t)readTimestamp
+              sendReadReceipt:(BOOL)sendReadReceipt
+                  transaction:(YapDatabaseReadWriteTransaction *)transaction;
 
 @end
+
+NS_ASSUME_NONNULL_END

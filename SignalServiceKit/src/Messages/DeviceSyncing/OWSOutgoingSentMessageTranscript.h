@@ -1,4 +1,6 @@
-//  Copyright © 2016 Open Whisper Systems. All rights reserved.
+//
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//
 
 #import "OWSOutgoingSyncMessage.h"
 
@@ -12,7 +14,12 @@ NS_ASSUME_NONNULL_BEGIN
  */
 @interface OWSOutgoingSentMessageTranscript : OWSOutgoingSyncMessage
 
-- (instancetype)initWithOutgoingMessage:(TSOutgoingMessage *)message;
+- (instancetype)init NS_UNAVAILABLE;
+- (instancetype)initWithTimestamp:(uint64_t)timestamp NS_UNAVAILABLE;
+
+- (instancetype)initWithOutgoingMessage:(TSOutgoingMessage *)message
+                      isRecipientUpdate:(BOOL)isRecipientUpdate NS_DESIGNATED_INITIALIZER;
+- (nullable instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
 
 @end
 

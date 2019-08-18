@@ -1,10 +1,14 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
+@class ConversationStyle;
+@class OWSLinkPreviewDraft;
+@class OWSQuotedReplyModel;
 @class SignalAttachment;
+@class StickerInfo;
 
 @protocol ConversationInputToolbarDelegate <NSObject>
 
@@ -12,19 +16,25 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)attachmentButtonPressed;
 
+- (void)cameraButtonPressed;
+
+- (void)sendSticker:(StickerInfo *)stickerInfo;
+
+- (void)presentManageStickersView;
+
+- (CGSize)rootViewSize;
+
 #pragma mark - Voice Memo
 
 - (void)voiceMemoGestureDidStart;
 
-- (void)voiceMemoGestureDidEnd;
+- (void)voiceMemoGestureDidLock;
+
+- (void)voiceMemoGestureDidComplete;
 
 - (void)voiceMemoGestureDidCancel;
 
-- (void)voiceMemoGestureDidChange:(CGFloat)cancelAlpha;
-
-#pragma mark - Attachment Approval
-
-- (void)didApproveAttachment:(SignalAttachment *)attachment;
+- (void)voiceMemoGestureDidUpdateCancelWithRatioComplete:(CGFloat)cancelAlpha;
 
 @end
 
@@ -36,22 +46,37 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface ConversationInputToolbar : UIView
 
+- (instancetype)initWithConversationStyle:(ConversationStyle *)conversationStyle NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithCoder:(NSCoder *)aDecoder NS_UNAVAILABLE;
+- (instancetype)initWithFrame:(CGRect)frame NS_UNAVAILABLE;
+
 @property (nonatomic, weak) id<ConversationInputToolbarDelegate> inputToolbarDelegate;
 
-- (void)beginEditingTextMessage;
-- (void)endEditingTextMessage;
+- (void)beginEditingMessage;
+- (void)endEditingMessage;
+- (BOOL)isInputViewFirstResponder;
 
 - (void)setInputTextViewDelegate:(id<ConversationInputTextViewDelegate>)value;
 
 - (NSString *)messageText;
-- (void)setMessageText:(NSString *_Nullable)value;
-- (void)clearTextMessage;
-
-- (nullable NSString *)textInputPrimaryLanguage;
+- (void)setMessageText:(NSString *_Nullable)value animated:(BOOL)isAnimated;
+- (void)acceptAutocorrectSuggestion;
+- (void)clearTextMessageAnimated:(BOOL)isAnimated;
+- (void)clearStickerKeyboard;
+- (void)toggleDefaultKeyboard;
 
 - (void)updateFontSizes;
 
+- (void)updateLayoutWithSafeAreaInsets:(UIEdgeInsets)safeAreaInsets;
+- (void)ensureTextViewHeight;
+
+- (void)viewDidAppear;
+
+- (void)ensureFirstResponderState;
+
 #pragma mark - Voice Memo
+
+- (void)lockVoiceMemoUI;
 
 - (void)showVoiceMemoUI;
 
@@ -61,11 +86,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)cancelVoiceMemoIfNecessary;
 
-#pragma mark - Attachment Approval
+#pragma mark -
 
-- (void)showApprovalUIForAttachment:(SignalAttachment *)attachment;
-- (void)viewWillAppear:(BOOL)animated;
-- (void)viewWillDisappear:(BOOL)animated;
+@property (nonatomic, nullable) OWSQuotedReplyModel *quotedReply;
+
+@property (nonatomic, nullable, readonly) OWSLinkPreviewDraft *linkPreviewDraft;
 
 @end
 

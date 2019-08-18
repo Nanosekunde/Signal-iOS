@@ -15,17 +15,17 @@ Pod::Spec.new do |s|
 An Objective-C library for communicating with the Signal messaging service.
   DESC
 
-  s.homepage         = "https://github.com/WhisperSystems/SignalServiceKit"
+  s.homepage         = "https://github.com/signalapp/SignalServiceKit"
   s.license          = 'GPLv3'
   s.author           = { "Frederic Jacobs" => "github@fredericjacobs.com" }
-  s.source           = { :git => "https://github.com/WhisperSystems/SignalServiceKit.git", :tag => s.version.to_s }
+  s.source           = { :git => "https://github.com/signalapp/SignalServiceKit.git", :tag => s.version.to_s }
   s.social_media_url = 'https://twitter.com/FredericJacobs'
 
-  s.platform     = :ios, '8.0'
-  #s.ios.deployment_target = '8.0'
+  s.platform     = :ios, '9.0'
+  #s.ios.deployment_target = '9.0'
   #s.osx.deployment_target = '10.9'
   s.requires_arc = true
-  s.source_files = 'SignalServiceKit/src/**/*.{h,m,mm}'
+  s.source_files = 'SignalServiceKit/src/**/*.{h,m,mm,swift}'
 
   # We want to use modules to avoid clobbering CocoaLumberjack macros defined
   # by other OWS modules which *also* import CocoaLumberjack. But because we
@@ -34,7 +34,8 @@ An Objective-C library for communicating with the Signal messaging service.
   s.compiler_flags = "-fcxx-modules"
 
   s.prefix_header_file = 'SignalServiceKit/src/TSPrefix.h'
-  s.xcconfig = { 'OTHER_CFLAGS' => '$(inherited) -DSQLITE_HAS_CODEC' }
+  s.xcconfig = { 'OTHER_CFLAGS' => '$(inherited) -DSQLITE_HAS_CODEC',
+                 'USER_HEADER_SEARCH_PATHS' => '$(inherited) $(SRCROOT)/libwebp/src'   }
 
   s.resources = ["SignalServiceKit/Resources/Certificates/*"]
 
@@ -44,10 +45,20 @@ An Objective-C library for communicating with the Signal messaging service.
   s.dependency 'AxolotlKit'
   s.dependency 'Mantle'
   s.dependency 'YapDatabase/SQLCipher'
-  s.dependency 'SocketRocket'
+  s.dependency 'Starscream'
   s.dependency 'libPhoneNumber-iOS'
   s.dependency 'GRKOpenSSLFramework'
   s.dependency 'SAMKeychain'
-  s.dependency 'TwistedOakCollapsingFutures'
   s.dependency 'Reachability'
+  s.dependency 'SwiftProtobuf'
+  s.dependency 'SignalCoreKit'
+  s.dependency 'SignalMetadataKit'
+  s.dependency 'GRDBCipher'
+  s.dependency 'libwebp'
+  s.dependency 'PromiseKit', "~> 6.0"
+  s.dependency 'YYImage/WebP'
+		
+  s.test_spec 'Tests' do |test_spec|
+    test_spec.source_files = 'SignalServiceKit/tests/**/*.{h,m,swift}'
+  end
 end

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "ConversationViewCell.h"
@@ -16,27 +16,26 @@ NS_ASSUME_NONNULL_BEGIN
     self.viewItem = nil;
     self.delegate = nil;
     self.isCellVisible = NO;
-    self.contentWidth = 0;
+    self.conversationStyle = nil;
 }
 
 - (void)loadForDisplay
 {
-    OWSFail(@"%@ This method should be overridden.", self.logTag);
+    OWSAbstractMethod();
 }
 
-- (CGSize)cellSizeForViewWidth:(int)viewWidth contentWidth:(int)contentWidth
+- (CGSize)cellSize
 {
-    OWSFail(@"%@ This method should be overridden.", self.logTag);
+    OWSAbstractMethod();
+
     return CGSizeZero;
 }
 
-- (void)setIsCellVisible:(BOOL)isCellVisible
+// For perf reasons, skip the default implementation which is only relevant for self-sizing cells.
+- (UICollectionViewLayoutAttributes *)preferredLayoutAttributesFittingAttributes:
+    (UICollectionViewLayoutAttributes *)layoutAttributes
 {
-    _isCellVisible = isCellVisible;
-
-    if (isCellVisible) {
-        [self layoutIfNeeded];
-    }
+    return layoutAttributes;
 }
 
 @end

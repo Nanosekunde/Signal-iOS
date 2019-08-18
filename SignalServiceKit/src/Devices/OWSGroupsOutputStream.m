@@ -1,40 +1,79 @@
-//  Copyright © 2016 Open Whisper Systems. All rights reserved.
+//
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
+//
 
 #import "OWSGroupsOutputStream.h"
 #import "MIMETypeUtil.h"
-#import "OWSSignalServiceProtos.pb.h"
+#import "OWSBlockingManager.h"
+#import "OWSDisappearingMessagesConfiguration.h"
 #import "TSGroupModel.h"
-#import <ProtocolBuffers/CodedOutputStream.h>
+#import "TSGroupThread.h"
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSGroupsOutputStream
 
-- (void)writeGroup:(TSGroupModel *)group
+- (void)writeGroup:(TSGroupThread *)groupThread transaction:(YapDatabaseReadTransaction *)transaction
 {
-    OWSSignalServiceProtosGroupDetailsBuilder *groupBuilder = [OWSSignalServiceProtosGroupDetailsBuilder new];
-    [groupBuilder setId:group.groupId];
+    OWSAssertDebug(groupThread);
+    OWSAssertDebug(transaction);
+
+    TSGroupModel *group = groupThread.groupModel;
+    OWSAssertDebug(group);
+
+    SSKProtoGroupDetailsBuilder *groupBuilder = [SSKProtoGroupDetails builderWithId:group.groupId];
     [groupBuilder setName:group.groupName];
-    [groupBuilder setMembersArray:group.groupMemberIds];
+    [groupBuilder setMembers:group.groupMemberIds];
+    [groupBuilder setColor:groupThread.conversationColorName];
+
+    if ([OWSBlockingManager.sharedManager isGroupIdBlocked:group.groupId]) {
+        [groupBuilder setBlocked:YES];
+    }
 
     NSData *avatarPng;
     if (group.groupImage) {
-        OWSSignalServiceProtosGroupDetailsAvatarBuilder *avatarBuilder =
-            [OWSSignalServiceProtosGroupDetailsAvatarBuilder new];
+        SSKProtoGroupDetailsAvatarBuilder *avatarBuilder = [SSKProtoGroupDetailsAvatar builder];
 
         [avatarBuilder setContentType:OWSMimeTypeImagePng];
         avatarPng = UIImagePNGRepresentation(group.groupImage);
         [avatarBuilder setLength:(uint32_t)avatarPng.length];
-        [groupBuilder setAvatarBuilder:avatarBuilder];
+
+        NSError *error;
+        SSKProtoGroupDetailsAvatar *_Nullable avatarProto = [avatarBuilder buildAndReturnError:&error];
+        if (error || !avatarProto) {
+            OWSFailDebug(@"could not build protobuf: %@", error);
+        } else {
+            [groupBuilder setAvatar:avatarProto];
+        }
     }
 
-    NSData *groupData = [[groupBuilder build] data];
+    OWSDisappearingMessagesConfiguration *_Nullable disappearingMessagesConfiguration =
+        [OWSDisappearingMessagesConfiguration fetchObjectWithUniqueID:groupThread.uniqueId transaction:transaction];
+
+    if (disappearingMessagesConfiguration && disappearingMessagesConfiguration.isEnabled) {
+        [groupBuilder setExpireTimer:disappearingMessagesConfiguration.durationSeconds];
+    } else {
+        // Rather than *not* set the field, we expicitly set it to 0 so desktop
+        // can easily distinguish between a modern client declaring "off" vs a
+        // legacy client "not specifying".
+        [groupBuilder setExpireTimer:0];
+    }
+
+    NSError *error;
+    NSData *_Nullable groupData = [groupBuilder buildSerializedDataAndReturnError:&error];
+    if (error || !groupData) {
+        OWSFailDebug(@"could not serialize protobuf: %@", error);
+        return;
+    }
+
     uint32_t groupDataLength = (uint32_t)groupData.length;
-    [self.delegateStream writeRawVarint32:groupDataLength];
-    [self.delegateStream writeRawData:groupData];
+
+    [self writeVariableLengthUInt32:groupDataLength];
+    [self writeData:groupData];
 
     if (avatarPng) {
-        [self.delegateStream writeRawData:avatarPng];
+        [self writeData:avatarPng];
     }
 }
 

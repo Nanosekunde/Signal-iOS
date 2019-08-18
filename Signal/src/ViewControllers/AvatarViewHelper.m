@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "AvatarViewHelper.h"
@@ -28,13 +28,12 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)showChangeAvatarUI
 {
     OWSAssertIsOnMainThread();
-    OWSAssert(self.delegate);
+    OWSAssertDebug(self.delegate);
 
-    UIAlertController *actionSheetController =
-        [UIAlertController alertControllerWithTitle:self.delegate.avatarActionSheetTitle
-                                            message:nil
-                                     preferredStyle:UIAlertControllerStyleActionSheet];
-    [actionSheetController addAction:[OWSAlerts cancelAction]];
+    UIAlertController *actionSheet = [UIAlertController alertControllerWithTitle:self.delegate.avatarActionSheetTitle
+                                                                         message:nil
+                                                                  preferredStyle:UIAlertControllerStyleActionSheet];
+    [actionSheet addAction:[OWSAlerts cancelAction]];
 
     UIAlertAction *takePictureAction = [UIAlertAction
         actionWithTitle:NSLocalizedString(@"MEDIA_FROM_CAMERA_BUTTON", @"media picker option to take photo or video")
@@ -42,7 +41,7 @@ NS_ASSUME_NONNULL_BEGIN
                 handler:^(UIAlertAction *_Nonnull action) {
                     [self takePicture];
                 }];
-    [actionSheetController addAction:takePictureAction];
+    [actionSheet addAction:takePictureAction];
 
     UIAlertAction *choosePictureAction = [UIAlertAction
         actionWithTitle:NSLocalizedString(@"MEDIA_FROM_LIBRARY_BUTTON", @"media picker option to choose from library")
@@ -50,7 +49,7 @@ NS_ASSUME_NONNULL_BEGIN
                 handler:^(UIAlertAction *_Nonnull action) {
                     [self chooseFromLibrary];
                 }];
-    [actionSheetController addAction:choosePictureAction];
+    [actionSheet addAction:choosePictureAction];
 
     if (self.delegate.hasClearAvatarAction) {
         UIAlertAction *clearAction = [UIAlertAction actionWithTitle:self.delegate.clearAvatarActionLabel
@@ -58,45 +57,51 @@ NS_ASSUME_NONNULL_BEGIN
                                                             handler:^(UIAlertAction *_Nonnull action) {
                                                                 [self.delegate clearAvatar];
                                                             }];
-        [actionSheetController addAction:clearAction];
+        [actionSheet addAction:clearAction];
     }
 
-    [self.delegate.fromViewController presentViewController:actionSheetController animated:true completion:nil];
+    [self.delegate.fromViewController presentAlert:actionSheet];
 }
 
 - (void)takePicture
 {
     OWSAssertIsOnMainThread();
-    OWSAssert(self.delegate);
+    OWSAssertDebug(self.delegate);
 
-    UIImagePickerController *picker = [[UIImagePickerController alloc] init];
-    picker.delegate = self;
-    picker.allowsEditing = NO;
-    picker.sourceType = UIImagePickerControllerSourceTypeCamera;
+    [self.delegate.fromViewController ows_askForCameraPermissions:^(BOOL granted) {
+        if (!granted) {
+            OWSLogWarn(@"Camera permission denied.");
+            return;
+        }
 
-    if ([UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypeCamera]) {
-        picker.mediaTypes = [[NSArray alloc] initWithObjects:(NSString *)kUTTypeImage, nil];
-        [self.delegate.fromViewController presentViewController:picker
-                                                       animated:YES
-                                                     completion:[UIUtil modalCompletionBlock]];
-    }
+        UIImagePickerController *picker = [OWSImagePickerController new];
+        picker.delegate = self;
+        picker.allowsEditing = NO;
+        picker.sourceType = UIImagePickerControllerSourceTypeCamera;
+        picker.mediaTypes = @[ (__bridge NSString *)kUTTypeImage ];
+
+        [self.delegate.fromViewController presentViewController:picker animated:YES completion:nil];
+    }];
 }
 
 - (void)chooseFromLibrary
 {
     OWSAssertIsOnMainThread();
-    OWSAssert(self.delegate);
+    OWSAssertDebug(self.delegate);
 
-    UIImagePickerController *picker = [[UIImagePickerController alloc] init];
-    picker.delegate = self;
-    picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+    [self.delegate.fromViewController ows_askForMediaLibraryPermissions:^(BOOL granted) {
+        if (!granted) {
+            OWSLogWarn(@"Media Library permission denied.");
+            return;
+        }
 
-    if ([UIImagePickerController isSourceTypeAvailable:UIImagePickerControllerSourceTypePhotoLibrary]) {
-        picker.mediaTypes = [[NSArray alloc] initWithObjects:(NSString *)kUTTypeImage, nil];
-        [self.delegate.fromViewController presentViewController:picker
-                                                       animated:YES
-                                                     completion:[UIUtil modalCompletionBlock]];
-    }
+        UIImagePickerController *picker = [OWSImagePickerController new];
+        picker.delegate = self;
+        picker.sourceType = UIImagePickerControllerSourceTypePhotoLibrary;
+        picker.mediaTypes = @[ (__bridge NSString *)kUTTypeImage ];
+
+        [self.delegate.fromViewController presentViewController:picker animated:YES completion:nil];
+    }];
 }
 
 /*
@@ -106,7 +111,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)imagePickerControllerDidCancel:(UIImagePickerController *)picker
 {
     OWSAssertIsOnMainThread();
-    OWSAssert(self.delegate);
+    OWSAssertDebug(self.delegate);
 
     [self.delegate.fromViewController dismissViewControllerAnimated:YES completion:nil];
 }
@@ -117,7 +122,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info
 {
     OWSAssertIsOnMainThread();
-    OWSAssert(self.delegate);
+    OWSAssertDebug(self.delegate);
 
     UIImage *rawAvatar = [info objectForKey:UIImagePickerControllerOriginalImage];
 
@@ -134,10 +139,9 @@ NS_ASSUME_NONNULL_BEGIN
                                                [self.delegate avatarDidChange:dstImage];
                                            });
                                        }];
-                                   [self.delegate.fromViewController
-                                       presentViewController:vc
-                                                    animated:YES
-                                                  completion:[UIUtil modalCompletionBlock]];
+                                   [self.delegate.fromViewController presentViewController:vc
+                                                                                  animated:YES
+                                                                                completion:nil];
                                }
                            }];
 }

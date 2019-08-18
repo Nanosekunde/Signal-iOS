@@ -1,23 +1,32 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSMessageSender.h"
 #import "AppContext.h"
-#import "ContactsUpdater.h"
 #import "NSData+keyVersionByte.h"
 #import "NSData+messagePadding.h"
+#import "NSError+MessageSending.h"
 #import "OWSBackgroundTask.h"
 #import "OWSBlockingManager.h"
+#import "OWSContact.h"
 #import "OWSDevice.h"
 #import "OWSDisappearingMessagesJob.h"
+#import "OWSDispatch.h"
 #import "OWSError.h"
 #import "OWSIdentityManager.h"
 #import "OWSMessageServiceParams.h"
+#import "OWSOperation.h"
 #import "OWSOutgoingSentMessageTranscript.h"
 #import "OWSOutgoingSyncMessage.h"
-#import "OWSUploadingService.h"
+#import "OWSPrimaryStorage.h"
+#import "OWSRequestFactory.h"
+#import "OWSUploadOperation.h"
 #import "PreKeyBundle+jsonDict.h"
+#import "SSKEnvironment.h"
+#import "SSKPreKeyStore.h"
+#import "SSKSessionStore.h"
+#import "SSKSignedPreKeyStore.h"
 #import "SignalRecipient.h"
 #import "TSAccountManager.h"
 #import "TSAttachmentStream.h"
@@ -29,21 +38,39 @@
 #import "TSNetworkManager.h"
 #import "TSOutgoingMessage.h"
 #import "TSPreKeyManager.h"
-#import "TSStorageManager+PreKeyStore.h"
-#import "TSStorageManager+SignedPreKeyStore.h"
-#import "TSStorageManager+sessionStore.h"
-#import "TSStorageManager.h"
+#import "TSQuotedMessage.h"
+#import "TSRequest.h"
+#import "TSSocketManager.h"
 #import "TSThread.h"
-#import "Threading.h"
 #import <AxolotlKit/AxolotlExceptions.h>
 #import <AxolotlKit/CipherMessage.h>
 #import <AxolotlKit/PreKeyBundle.h>
 #import <AxolotlKit/SessionBuilder.h>
 #import <AxolotlKit/SessionCipher.h>
-#import <TwistedOakCollapsingFutures/CollapsingFutures.h>
-#import <objc/runtime.h>
+#import <PromiseKit/AnyPromise.h>
+#import <SignalCoreKit/NSData+OWS.h>
+#import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalCoreKit/SCKExceptionWrapper.h>
+#import <SignalCoreKit/Threading.h>
+#import <SignalMetadataKit/SignalMetadataKit-Swift.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+NSString *NoSessionForTransientMessageException = @"NoSessionForTransientMessageException";
+
+const NSUInteger kOversizeTextMessageSizeThreshold = 2 * 1024;
+
+NSError *SSKEnsureError(NSError *_Nullable error, OWSErrorCode fallbackCode, NSString *fallbackErrorDescription)
+{
+    if (error) {
+        return error;
+    }
+    OWSCFailDebug(@"Using fallback error.");
+    return OWSErrorWithCodeDescription(fallbackCode, fallbackErrorDescription);
+}
+
+#pragma mark -
 
 void AssertIsOnSendingQueue()
 {
@@ -54,54 +81,28 @@ void AssertIsOnSendingQueue()
 #endif
 }
 
-static void *kNSError_MessageSender_IsRetryable = &kNSError_MessageSender_IsRetryable;
-static void *kNSError_MessageSender_ShouldBeIgnoredForGroups = &kNSError_MessageSender_ShouldBeIgnoredForGroups;
-static void *kNSError_MessageSender_IsFatal = &kNSError_MessageSender_IsFatal;
+#pragma mark -
 
-// isRetryable and isFatal are opposites but not redundant.
-//
-// If a group message send fails, the send will be retried if any of the errors were retryable UNLESS
-// any of the errors were fatal.  Fatal errors trump retryable errors.
-@implementation NSError (OWSMessageSender)
+@implementation OWSOutgoingAttachmentInfo
 
-- (BOOL)isRetryable
+- (instancetype)initWithDataSource:(DataSource *)dataSource
+                       contentType:(NSString *)contentType
+                    sourceFilename:(nullable NSString *)sourceFilename
+                           caption:(nullable NSString *)caption
+                    albumMessageId:(nullable NSString *)albumMessageId
 {
-    NSNumber *value = objc_getAssociatedObject(self, kNSError_MessageSender_IsRetryable);
-    // This value should always be set for all errors by the time OWSSendMessageOperation
-    // queries it's value.  If not, default to retrying in production.
-    OWSAssert(value);
-    return value ? [value boolValue] : YES;
-}
+    self = [super init];
+    if (!self) {
+        return self;
+    }
 
-- (void)setIsRetryable:(BOOL)value
-{
-    objc_setAssociatedObject(self, kNSError_MessageSender_IsRetryable, @(value), OBJC_ASSOCIATION_COPY);
-}
+    _dataSource = dataSource;
+    _contentType = contentType;
+    _sourceFilename = sourceFilename;
+    _caption = caption;
+    _albumMessageId = albumMessageId;
 
-- (BOOL)shouldBeIgnoredForGroups
-{
-    NSNumber *value = objc_getAssociatedObject(self, kNSError_MessageSender_ShouldBeIgnoredForGroups);
-    // This value will NOT always be set for all errors by the time we query it's value.
-    // Default to NOT ignoring.
-    return value ? [value boolValue] : NO;
-}
-
-- (void)setShouldBeIgnoredForGroups:(BOOL)value
-{
-    objc_setAssociatedObject(self, kNSError_MessageSender_ShouldBeIgnoredForGroups, @(value), OBJC_ASSOCIATION_COPY);
-}
-
-- (BOOL)isFatal
-{
-    NSNumber *value = objc_getAssociatedObject(self, kNSError_MessageSender_IsFatal);
-    // This value will NOT always be set for all errors by the time we query it's value.
-    // Default to NOT fatal.
-    return value ? [value boolValue] : NO;
-}
-
-- (void)setIsFatal:(BOOL)value
-{
-    objc_setAssociatedObject(self, kNSError_MessageSender_IsFatal, @(value), OBJC_ASSOCIATION_COPY);
+    return self;
 }
 
 @end
@@ -115,27 +116,22 @@ static void *kNSError_MessageSender_IsFatal = &kNSError_MessageSender_IsFatal;
  * Used by `OWSMessageSender` to serialize message sending, ensuring that messages are emitted in the order they
  * were sent.
  */
-@interface OWSSendMessageOperation : NSOperation
+@interface OWSSendMessageOperation : OWSOperation
 
 - (instancetype)init NS_UNAVAILABLE;
 - (instancetype)initWithMessage:(TSOutgoingMessage *)message
                   messageSender:(OWSMessageSender *)messageSender
-                        success:(void (^)(void))successHandler
-                        failure:(void (^)(NSError *_Nonnull error))failureHandler NS_DESIGNATED_INITIALIZER;
+                   dbConnection:(YapDatabaseConnection *)dbConnection
+                        success:(void (^)(void))aSuccessHandler
+                        failure:(void (^)(NSError * error))aFailureHandler NS_DESIGNATED_INITIALIZER;
 
 @end
 
 #pragma mark -
 
-typedef NS_ENUM(NSInteger, OWSSendMessageOperationState) {
-    OWSSendMessageOperationStateNew,
-    OWSSendMessageOperationStateExecuting,
-    OWSSendMessageOperationStateFinished
-};
-
 @interface OWSMessageSender (OWSSendMessageOperation)
 
-- (void)attemptToSendMessage:(TSOutgoingMessage *)message
+- (void)sendMessageToService:(TSOutgoingMessage *)message
                      success:(void (^)(void))successHandler
                      failure:(RetryableFailureHandler)failureHandler;
 
@@ -143,19 +139,13 @@ typedef NS_ENUM(NSInteger, OWSSendMessageOperationState) {
 
 #pragma mark -
 
-NSString *const OWSSendMessageOperationKeyIsExecuting = @"isExecuting";
-NSString *const OWSSendMessageOperationKeyIsFinished = @"isFinished";
-
-NSUInteger const OWSSendMessageOperationMaxRetries = 4;
-
 @interface OWSSendMessageOperation ()
 
 @property (nonatomic, readonly) TSOutgoingMessage *message;
 @property (nonatomic, readonly) OWSMessageSender *messageSender;
+@property (nonatomic, readonly) YapDatabaseConnection *dbConnection;
 @property (nonatomic, readonly) void (^successHandler)(void);
-@property (nonatomic, readonly) void (^failureHandler)(NSError *_Nonnull error);
-@property (nonatomic) OWSSendMessageOperationState operationState;
-@property (nonatomic) OWSBackgroundTask *backgroundTask;
+@property (nonatomic, readonly) void (^failureHandler)(NSError * error);
 
 @end
 
@@ -163,204 +153,225 @@ NSUInteger const OWSSendMessageOperationMaxRetries = 4;
 
 @implementation OWSSendMessageOperation
 
+#pragma mark - Dependencies
+
+- (SDSDatabaseStorage *)databaseStorage
+{
+    return SDSDatabaseStorage.shared;
+}
+
+#pragma mark -
+
 - (instancetype)initWithMessage:(TSOutgoingMessage *)message
                   messageSender:(OWSMessageSender *)messageSender
-                        success:(void (^)(void))aSuccessHandler
-                        failure:(void (^)(NSError *_Nonnull error))aFailureHandler
+                   dbConnection:(YapDatabaseConnection *)dbConnection
+                        success:(void (^)(void))successHandler
+                        failure:(void (^)(NSError * error))failureHandler
 {
     self = [super init];
     if (!self) {
         return self;
     }
 
-    _operationState = OWSSendMessageOperationStateNew;
-    self.backgroundTask = [OWSBackgroundTask backgroundTaskWithLabelStr:__PRETTY_FUNCTION__];
-
     _message = message;
     _messageSender = messageSender;
-
-    __weak typeof(self) weakSelf = self;
-    _successHandler = ^{
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) {
-            OWSProdCFail([OWSAnalyticsEvents messageSenderErrorSendOperationDidNotComplete]);
-            return;
-        }
-
-        [message updateWithMessageState:TSOutgoingMessageStateSentToService];
-
-        aSuccessHandler();
-
-        [strongSelf markAsComplete];
-    };
-
-    _failureHandler = ^(NSError *_Nonnull error) {
-        typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) {
-            OWSProdCFail([OWSAnalyticsEvents messageSenderErrorSendOperationDidNotComplete]);
-            return;
-        }
-
-        [strongSelf.message updateWithSendingError:error];
-
-        DDLogDebug(@"%@ failed with error: %@", strongSelf.logTag, error);
-        aFailureHandler(error);
-
-        [strongSelf markAsComplete];
-    };
+    _dbConnection = dbConnection;
+    _successHandler = successHandler;
+    _failureHandler = failureHandler;
 
     return self;
 }
 
-#pragma mark - NSOperation overrides
+#pragma mark - OWSOperation overrides
 
-- (BOOL)isExecuting
+- (nullable NSError *)checkForPreconditionError
 {
-    return self.operationState == OWSSendMessageOperationStateExecuting;
+    __block NSError *_Nullable error = [super checkForPreconditionError];
+    if (error) {
+        return error;
+    }
+
+    // Sanity check preconditions
+    if (self.message.hasAttachments) {
+        [self.databaseStorage readWithBlock:^(SDSAnyReadTransaction *transaction) {
+            for (TSAttachment *attachment in [self.message allAttachmentsWithTransaction:transaction]) {
+                if (![attachment isKindOfClass:[TSAttachmentStream class]]) {
+                    error = OWSErrorMakeFailedToSendOutgoingMessageError();
+                    break;
+                }
+
+                TSAttachmentStream *attachmentStream = (TSAttachmentStream *)attachment;
+                OWSAssertDebug(attachmentStream);
+                OWSAssertDebug(attachmentStream.serverId);
+                OWSAssertDebug(attachmentStream.isUploaded);
+            }
+        }];
+    }
+
+    return error;
 }
 
-- (BOOL)isFinished
+- (void)run
 {
-    return self.operationState == OWSSendMessageOperationStateFinished;
-}
-
-- (void)start
-{
-    [self willChangeValueForKey:OWSSendMessageOperationKeyIsExecuting];
-    self.operationState = OWSSendMessageOperationStateExecuting;
-    [self didChangeValueForKey:OWSSendMessageOperationKeyIsExecuting];
-    [self main];
-}
-
-- (void)main
-{
-    [self tryWithRemainingRetries:OWSSendMessageOperationMaxRetries];
-}
-
-#pragma mark - methods
-
-- (void)tryWithRemainingRetries:(NSUInteger)remainingRetries
-{
-    // If the message has been deleted, abort send.
-    if (self.message.shouldBeSaved && ![TSOutgoingMessage fetchObjectWithUniqueID:self.message.uniqueId]) {
-        DDLogInfo(@"%@ aborting message send; message deleted.", self.logTag);
-        NSError *error = OWSErrorWithCodeDescription(
-            OWSErrorCodeMessageDeletedBeforeSent, @"Message was deleted before it could be sent.");
-        self.failureHandler(error);
+    if (SSKAppExpiry.isExpired) {
+        OWSLogWarn(@"Unable to send because the application has expired.");
+        NSError *error = OWSErrorWithCodeDescription(OWSErrorCodeAppExired,
+            NSLocalizedString(
+                @"ERROR_SENDING_EXPIRED", @"Error indicating a send failure due to an expired application."));
+        error.isRetryable = NO;
+        [self reportError:error];
         return;
     }
 
-    // Use this flag to ensure a given operation only succeeds or fails once.
-    __block BOOL onceFlag = NO;
-    RetryableFailureHandler retryableFailureHandler = ^(NSError *_Nonnull error) {
-        DDLogInfo(@"%@ Sending failed. Remaining retries: %lu", self.logTag, (unsigned long)remainingRetries);
-
-        OWSAssert(!onceFlag);
-        onceFlag = YES;
-
-        if (![error isRetryable] || [error isFatal]) {
-            DDLogInfo(@"%@ Skipping retry due to terminal error: %@", self.logTag, error);
-            self.failureHandler(error);
-            return;
-        }
-
-        if (remainingRetries > 0) {
-            [self tryWithRemainingRetries:remainingRetries - 1];
-        } else {
-            DDLogWarn(@"%@ Too many failures. Giving up sending.", self.logTag);
-
-            self.failureHandler(error);
-        }
-    };
-
-    [self.messageSender attemptToSendMessage:self.message
-                                     success:^{
-                                         OWSAssert(!onceFlag);
-                                         onceFlag = YES;
-
-                                         self.successHandler();
-                                     }
-                                     failure:retryableFailureHandler];
-}
-
-- (void)markAsComplete
-{
-    [self willChangeValueForKey:OWSSendMessageOperationKeyIsExecuting];
-    [self willChangeValueForKey:OWSSendMessageOperationKeyIsFinished];
-
-    // Ensure we call the success or failure handler exactly once.
-    @synchronized(self)
-    {
-        OWSAssert(self.operationState != OWSSendMessageOperationStateFinished);
-
-        self.operationState = OWSSendMessageOperationStateFinished;
+    // If the message has been deleted, abort send.
+    if (self.message.shouldBeSaved && ![TSOutgoingMessage fetchObjectWithUniqueID:self.message.uniqueId]) {
+        OWSLogInfo(@"aborting message send; message deleted.");
+        NSError *error = OWSErrorWithCodeDescription(
+            OWSErrorCodeMessageDeletedBeforeSent, @"Message was deleted before it could be sent.");
+        error.isFatal = YES;
+        [self reportError:error];
+        return;
     }
 
-    [self didChangeValueForKey:OWSSendMessageOperationKeyIsExecuting];
-    [self didChangeValueForKey:OWSSendMessageOperationKeyIsFinished];
+    [self.messageSender sendMessageToService:self.message
+        success:^{
+            [self reportSuccess];
+        }
+        failure:^(NSError *error) {
+            [self reportError:error];
+        }];
+}
+
+- (void)didSucceed
+{
+    if (self.message.messageState != TSOutgoingMessageStateSent) {
+        OWSFailDebug(@"unexpected message status: %@", self.message.statusDescription);
+    }
+
+    self.successHandler();
+}
+
+- (void)didFailWithError:(NSError *)error
+{
+    OWSLogError(@"failed with error: %@", error);
+    self.failureHandler(error);
 }
 
 @end
 
+#pragma mark -
 
-int const OWSMessageSenderRetryAttempts = 3;
 NSString *const OWSMessageSenderInvalidDeviceException = @"InvalidDeviceException";
 NSString *const OWSMessageSenderRateLimitedException = @"RateLimitedException";
 
 @interface OWSMessageSender ()
 
-@property (nonatomic, readonly) TSNetworkManager *networkManager;
-@property (nonatomic, readonly) TSStorageManager *storageManager;
-@property (nonatomic, readonly) OWSBlockingManager *blockingManager;
-@property (nonatomic, readonly) OWSUploadingService *uploadingService;
+@property (nonatomic, readonly) OWSPrimaryStorage *primaryStorage;
 @property (nonatomic, readonly) YapDatabaseConnection *dbConnection;
-@property (nonatomic, readonly) id<ContactsManagerProtocol> contactsManager;
-@property (nonatomic, readonly) ContactsUpdater *contactsUpdater;
 @property (atomic, readonly) NSMutableDictionary<NSString *, NSOperationQueue *> *sendingQueueMap;
 
 @end
 
+#pragma mark -
+
 @implementation OWSMessageSender
 
-- (instancetype)initWithNetworkManager:(TSNetworkManager *)networkManager
-                        storageManager:(TSStorageManager *)storageManager
-                       contactsManager:(id<ContactsManagerProtocol>)contactsManager
-                       contactsUpdater:(ContactsUpdater *)contactsUpdater
+- (instancetype)initWithPrimaryStorage:(OWSPrimaryStorage *)primaryStorage
 {
     self = [super init];
     if (!self) {
         return self;
     }
 
-    _networkManager = networkManager;
-    _storageManager = storageManager;
-    _contactsManager = contactsManager;
-    _contactsUpdater = contactsUpdater;
+    _primaryStorage = primaryStorage;
     _sendingQueueMap = [NSMutableDictionary new];
-
-    _uploadingService = [[OWSUploadingService alloc] initWithNetworkManager:networkManager];
-    _dbConnection = storageManager.newDatabaseConnection;
+    _dbConnection = primaryStorage.newDatabaseConnection;
 
     OWSSingletonAssert();
 
     return self;
 }
 
-- (void)setBlockingManager:(OWSBlockingManager *)blockingManager
-{
-    OWSAssert(blockingManager);
-    OWSAssert(!_blockingManager);
+#pragma mark - Dependencies
 
-    _blockingManager = blockingManager;
+- (id<ContactsManagerProtocol>)contactsManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.contactsManager);
+
+    return SSKEnvironment.shared.contactsManager;
 }
+
+- (OWSBlockingManager *)blockingManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.blockingManager);
+
+    return SSKEnvironment.shared.blockingManager;
+}
+
+- (TSNetworkManager *)networkManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.networkManager);
+
+    return SSKEnvironment.shared.networkManager;
+}
+
+- (id<OWSUDManager>)udManager
+{
+    OWSAssertDebug(SSKEnvironment.shared.udManager);
+
+    return SSKEnvironment.shared.udManager;
+}
+
+- (TSAccountManager *)tsAccountManager
+{
+    return TSAccountManager.sharedInstance;
+}
+
+- (OWSIdentityManager *)identityManager
+{
+    return SSKEnvironment.shared.identityManager;
+}
+
+- (SSKSessionStore *)sessionStore
+{
+    return SSKEnvironment.shared.sessionStore;
+}
+
+- (SSKPreKeyStore *)preKeyStore
+{
+    return SSKEnvironment.shared.preKeyStore;
+}
+
+- (SSKSignedPreKeyStore *)signedPreKeyStore
+{
+    return SSKEnvironment.shared.signedPreKeyStore;
+}
+
+- (SDSDatabaseStorage *)databaseStorage
+{
+    return SDSDatabaseStorage.shared;
+}
+
++ (SDSDatabaseStorage *)databaseStorage
+{
+    return SDSDatabaseStorage.shared;
+}
+
+#pragma mark -
 
 - (NSOperationQueue *)sendingQueueForMessage:(TSOutgoingMessage *)message
 {
-    OWSAssert(message);
+    OWSAssertDebug(message);
+
 
     NSString *kDefaultQueueKey = @"kDefaultQueueKey";
     NSString *queueKey = message.uniqueThreadId ?: kDefaultQueueKey;
-    OWSAssert(queueKey.length > 0);
+    OWSAssertDebug(queueKey.length > 0);
+
+    if ([kDefaultQueueKey isEqualToString:queueKey]) {
+        // when do we get here?
+        OWSLogDebug(@"using default message queue");
+    }
 
     @synchronized(self)
     {
@@ -370,7 +381,7 @@ NSString *const OWSMessageSenderRateLimitedException = @"RateLimitedException";
             sendingQueue = [NSOperationQueue new];
             sendingQueue.qualityOfService = NSOperationQualityOfServiceUserInitiated;
             sendingQueue.maxConcurrentOperationCount = 1;
-
+            sendingQueue.name = [NSString stringWithFormat:@"%@:%@", self.logTag, queueKey];
             self.sendingQueueMap[queueKey] = sendingQueue;
         }
 
@@ -378,13 +389,18 @@ NSString *const OWSMessageSenderRateLimitedException = @"RateLimitedException";
     }
 }
 
-- (void)enqueueMessage:(TSOutgoingMessage *)message
-               success:(void (^)(void))successHandler
-               failure:(void (^)(NSError *error))failureHandler
+- (void)sendMessage:(TSOutgoingMessage *)message
+            success:(void (^)(void))successHandler
+            failure:(void (^)(NSError *error))failureHandler
 {
-    OWSAssert(message);
+    OWSAssertDebug(message);
+    if (message.body.length > 0) {
+        OWSAssertDebug([message.body lengthOfBytesUsingEncoding:NSUTF8StringEncoding] <= kOversizeTextMessageSizeThreshold);
+    }
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSMutableArray<NSString *> *allAttachmentIds = [NSMutableArray new];
+
         // This method will use a read/write transaction. This transaction
         // will block until any open read/write transactions are complete.
         //
@@ -398,372 +414,404 @@ NSString *const OWSMessageSenderRateLimitedException = @"RateLimitedException";
         // So we're using YDB behavior to ensure this invariant, which is a bit
         // unorthodox.
         [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-            // All outgoing messages should be saved at the time they are enqueued.
-            [message saveWithTransaction:transaction];
-            [message updateWithMessageState:TSOutgoingMessageStateAttemptingOut transaction:transaction];
+            [allAttachmentIds
+                addObjectsFromArray:[OutgoingMessagePreparer prepareMessageForSending:message transaction:transaction]];
         }];
 
+        NSOperationQueue *sendingQueue = [self sendingQueueForMessage:message];
         OWSSendMessageOperation *sendMessageOperation =
             [[OWSSendMessageOperation alloc] initWithMessage:message
                                                messageSender:self
+                                                dbConnection:self.dbConnection
                                                      success:successHandler
                                                      failure:failureHandler];
 
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            NSOperationQueue *sendingQueue = [self sendingQueueForMessage:message];
-            [sendingQueue addOperation:sendMessageOperation];
-        });
+        for (NSString *attachmentId in allAttachmentIds) {
+            OWSUploadOperation *uploadAttachmentOperation =
+                [[OWSUploadOperation alloc] initWithAttachmentId:attachmentId dbConnection:self.dbConnection];
+            // TODO: put attachment uploads on a (low priority) concurrent queue
+            [sendMessageOperation addDependency:uploadAttachmentOperation];
+            [sendingQueue addOperation:uploadAttachmentOperation];
+        }
+
+        [sendingQueue addOperation:sendMessageOperation];
     });
 }
 
-- (void)attemptToSendMessage:(TSOutgoingMessage *)message
-                     success:(void (^)(void))successHandler
-                     failure:(RetryableFailureHandler)failureHandler
+- (void)sendTemporaryAttachment:(DataSource *)dataSource
+                    contentType:(NSString *)contentType
+                      inMessage:(TSOutgoingMessage *)message
+                        success:(void (^)(void))successHandler
+                        failure:(void (^)(NSError *error))failureHandler
 {
-    [self ensureAnyAttachmentsUploaded:message
-        success:^() {
-            [self sendMessageToService:message
-                               success:successHandler
-                               failure:^(NSError *error) {
-                                   DDLogDebug(
-                                       @"%@ Message send attempt failed: %@", self.logTag, message.debugDescription);
-                                   failureHandler(error);
-                               }];
-        }
-        failure:^(NSError *error) {
-            DDLogDebug(@"%@ Attachment upload attempt failed: %@", self.logTag, message.debugDescription);
-            failureHandler(error);
-        }];
-}
-
-- (void)ensureAnyAttachmentsUploaded:(TSOutgoingMessage *)message
-                             success:(void (^)(void))successHandler
-                             failure:(RetryableFailureHandler)failureHandler
-{
-    if (!message.hasAttachments) {
-        return successHandler();
-    }
-
-    TSAttachmentStream *attachmentStream =
-        [TSAttachmentStream fetchObjectWithUniqueID:message.attachmentIds.firstObject];
-
-    if (!attachmentStream) {
-        OWSProdError([OWSAnalyticsEvents messageSenderErrorCouldNotLoadAttachment]);
-        NSError *error = OWSErrorMakeFailedToSendOutgoingMessageError();
-        // Not finding local attachment is a terminal failure.
-        [error setIsRetryable:NO];
-        return failureHandler(error);
-    }
-
-    [self.uploadingService uploadAttachmentStream:attachmentStream
-                                          message:message
-                                          success:successHandler
-                                          failure:failureHandler];
-}
-
-- (void)enqueueTemporaryAttachment:(DataSource *)dataSource
-                       contentType:(NSString *)contentType
-                         inMessage:(TSOutgoingMessage *)message
-                           success:(void (^)(void))successHandler
-                           failure:(void (^)(NSError *error))failureHandler
-{
-    OWSAssert(dataSource);
+    OWSAssertDebug(dataSource);
 
     void (^successWithDeleteHandler)(void) = ^() {
         successHandler();
 
-        DDLogDebug(@"%@ Removing successful temporary attachment message with attachment ids: %@",
-            self.logTag,
-            message.attachmentIds);
+        OWSLogDebug(@"Removing successful temporary attachment message with attachment ids: %@", message.attachmentIds);
         [message remove];
     };
 
     void (^failureWithDeleteHandler)(NSError *error) = ^(NSError *error) {
         failureHandler(error);
 
-        DDLogDebug(@"%@ Removing failed temporary attachment message with attachment ids: %@",
-            self.logTag,
-            message.attachmentIds);
+        OWSLogDebug(@"Removing failed temporary attachment message with attachment ids: %@", message.attachmentIds);
         [message remove];
     };
 
-    [self enqueueAttachment:dataSource
-                contentType:contentType
-             sourceFilename:nil
-                  inMessage:message
-                    success:successWithDeleteHandler
-                    failure:failureWithDeleteHandler];
+    [self sendAttachment:dataSource
+             contentType:contentType
+          sourceFilename:nil
+          albumMessageId:nil
+               inMessage:message
+                 success:successWithDeleteHandler
+                 failure:failureWithDeleteHandler];
 }
 
-- (void)enqueueAttachment:(DataSource *)dataSource
-              contentType:(NSString *)contentType
-           sourceFilename:(nullable NSString *)sourceFilename
-                inMessage:(TSOutgoingMessage *)message
-                  success:(void (^)(void))successHandler
-                  failure:(void (^)(NSError *error))failureHandler
+- (void)sendAttachment:(DataSource *)dataSource
+           contentType:(NSString *)contentType
+        sourceFilename:(nullable NSString *)sourceFilename
+        albumMessageId:(nullable NSString *)albumMessageId
+             inMessage:(TSOutgoingMessage *)message
+               success:(void (^)(void))success
+               failure:(void (^)(NSError *error))failure
 {
-    OWSAssert(dataSource);
+    OWSAssertDebug(dataSource);
 
-    dispatch_async([OWSDispatch attachmentsQueue], ^{
-        TSAttachmentStream *attachmentStream =
-            [[TSAttachmentStream alloc] initWithContentType:contentType
-                                                  byteCount:(UInt32)dataSource.dataLength
-                                             sourceFilename:sourceFilename];
-        if (message.isVoiceMessage) {
-            attachmentStream.attachmentType = TSAttachmentTypeVoiceMessage;
-        }
-
-        if (![attachmentStream writeDataSource:dataSource]) {
-            OWSProdError([OWSAnalyticsEvents messageSenderErrorCouldNotWriteAttachment]);
-            NSError *error = OWSErrorMakeWriteAttachmentDataError();
-            return failureHandler(error);
-        }
-
-        [attachmentStream save];
-        [message.attachmentIds addObject:attachmentStream.uniqueId];
-        if (sourceFilename) {
-            message.attachmentFilenameMap[attachmentStream.uniqueId] = sourceFilename;
-        }
-
-        [self enqueueMessage:message success:successHandler failure:failureHandler];
-    });
+    OWSOutgoingAttachmentInfo *attachmentInfo = [[OWSOutgoingAttachmentInfo alloc] initWithDataSource:dataSource
+                                                                                          contentType:contentType
+                                                                                       sourceFilename:sourceFilename
+                                                                                              caption:nil
+                                                                                       albumMessageId:albumMessageId];
+    [self sendAttachments:@[
+        attachmentInfo,
+    ]
+                inMessage:message
+                  success:success
+                  failure:failure];
 }
 
-- (NSArray<SignalRecipient *> *)getRecipients:(NSArray<NSString *> *)identifiers error:(NSError **)error
+- (void)sendAttachments:(NSArray<OWSOutgoingAttachmentInfo *> *)attachmentInfos
+              inMessage:(TSOutgoingMessage *)message
+                success:(void (^)(void))success
+                failure:(void (^)(NSError *error))failure
 {
-    NSMutableArray<SignalRecipient *> *recipients = [NSMutableArray new];
+    OWSAssertDebug(attachmentInfos.count > 0);
 
-    for (NSString *recipientId in identifiers) {
-        SignalRecipient *existingRecipient = [SignalRecipient recipientWithTextSecureIdentifier:recipientId];
-
-        if (existingRecipient) {
-            [recipients addObject:existingRecipient];
-        } else {
-            SignalRecipient *newRecipient = [self.contactsUpdater synchronousLookup:recipientId error:error];
-            if (newRecipient) {
-                [recipients addObject:newRecipient];
-            }
-        }
-    }
-
-    if (recipients.count == 0 && !*error) {
-        // error should be set in contactsUpater, but just in case.
-        OWSProdError([OWSAnalyticsEvents messageSenderErrorCouldNotFindContacts1]);
-        *error = OWSErrorMakeFailedToSendOutgoingMessageError();
-    }
-
-    return [recipients copy];
+    [OutgoingMessagePreparer prepareAttachments:attachmentInfos
+                                      inMessage:message
+                              completionHandler:^(NSError *_Nullable error) {
+                                  if (error) {
+                                      failure(error);
+                                      return;
+                                  }
+                                  [self sendMessage:message success:success failure:failure];
+                              }];
 }
 
 - (void)sendMessageToService:(TSOutgoingMessage *)message
-                     success:(void (^)(void))successHandler
-                     failure:(RetryableFailureHandler)failureHandler
+                     success:(void (^)(void))success
+                     failure:(RetryableFailureHandler)failure
 {
-    dispatch_async([OWSDispatch sendingQueue], ^{
-        TSThread *thread = message.thread;
-
-        if ([thread isKindOfClass:[TSGroupThread class]]) {
-            TSGroupThread *gThread = (TSGroupThread *)thread;
-
-            NSError *error;
-            NSArray<SignalRecipient *> *recipients =
-                [self getRecipients:gThread.groupModel.groupMemberIds error:&error];
-
-            if (recipients.count == 0) {
-                if (!error) {
-                    OWSProdError([OWSAnalyticsEvents messageSenderErrorCouldNotFindContacts2]);
-                    error = OWSErrorMakeFailedToSendOutgoingMessageError();
-                }
-                // If no recipients were found, there's no reason to retry. It will just fail again.
-                [error setIsRetryable:NO];
-                failureHandler(error);
-                return;
-            }
-
-            [self groupSend:recipients message:message thread:gThread success:successHandler failure:failureHandler];
-
-        } else if ([thread isKindOfClass:[TSContactThread class]]
-            || [message isKindOfClass:[OWSOutgoingSyncMessage class]]) {
-
-            TSContactThread *contactThread = (TSContactThread *)thread;
-            if ([contactThread.contactIdentifier isEqualToString:[TSAccountManager localNumber]]
-                && ![message isKindOfClass:[OWSOutgoingSyncMessage class]]) {
-
-                [self handleSendToMyself:message];
-                successHandler();
-                return;
-            }
-
-            NSString *recipientContactId = [message isKindOfClass:[OWSOutgoingSyncMessage class]]
-                ? [TSAccountManager localNumber]
-                : contactThread.contactIdentifier;
-
-            // If we block a user, don't send 1:1 messages to them. The UI
-            // should prevent this from occurring, but in some edge cases
-            // you might, for example, have a pending outgoing message when
-            // you block them.
-            OWSAssert(recipientContactId.length > 0);
-            if ([_blockingManager isRecipientIdBlocked:recipientContactId]) {
-                DDLogInfo(@"%@ skipping 1:1 send to blocked contact: %@", self.logTag, recipientContactId);
-                NSError *error = OWSErrorMakeMessageSendFailedToBlockListError();
-                // No need to retry - the user will continue to be blocked.
-                [error setIsRetryable:NO];
-                failureHandler(error);
-                return;
-            }
-
-            SignalRecipient *recipient = [SignalRecipient recipientWithTextSecureIdentifier:recipientContactId];
-            if (!recipient) {
-                NSError *error;
-                // possibly returns nil.
-                recipient = [self.contactsUpdater synchronousLookup:recipientContactId error:&error];
-
-                if (error) {
-                    if (error.code == OWSErrorCodeNoSuchSignalRecipient) {
-                        DDLogWarn(@"%@ recipient contact not found", self.logTag);
-                        [self unregisteredRecipient:recipient message:message thread:thread];
-                    }
-
-                    OWSProdError([OWSAnalyticsEvents messageSenderErrorCouldNotFindContacts3]);
-                    // No need to repeat trying to find a failure. Apart from repeatedly failing, it would also cause us
-                    // to print redundant error messages.
-                    [error setIsRetryable:NO];
-                    failureHandler(error);
-                    return;
-                }
-            }
-
-            if (!recipient) {
-                NSError *error = OWSErrorMakeFailedToSendOutgoingMessageError();
-                DDLogWarn(@"recipient contact still not found after attempting lookup.");
-                // No need to repeat trying to find a failure. Apart from repeatedly failing, it would also cause us to
-                // print redundant error messages.
-                [error setIsRetryable:NO];
-                failureHandler(error);
-                return;
-            }
-
-            [self sendMessageToService:message
-                             recipient:recipient
-                                thread:thread
-                              attempts:OWSMessageSenderRetryAttempts
-                               success:successHandler
-                               failure:failureHandler];
-        } else {
-            // Neither a group nor contact thread? This should never happen.
-            OWSFail(@"%@ Unknown message type: %@", self.logTag, NSStringFromClass([message class]));
-
-            NSError *error = OWSErrorMakeFailedToSendOutgoingMessageError();
-            [error setIsRetryable:NO];
-            failureHandler(error);
-        }
-    });
-}
-
-// For group sends, we're using chained futures to make the code more readable.
-- (TOCFuture *)sendMessageFuture:(TSOutgoingMessage *)message
-                       recipient:(SignalRecipient *)recipient
-                          thread:(TSThread *)thread
-{
-    TOCFutureSource *futureSource = [[TOCFutureSource alloc] init];
-
-    [self sendMessageToService:message
-        recipient:recipient
-        thread:thread
-        attempts:OWSMessageSenderRetryAttempts
-        success:^{
-            DDLogInfo(@"%@ Marking group message as sent to recipient: %@", self.logTag, recipient.uniqueId);
-            [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-                [message updateWithSentRecipient:recipient.uniqueId transaction:transaction];
-            }];
-            [futureSource trySetResult:@1];
+    [self.udManager
+        ensureSenderCertificateWithSuccess:^(SMKSenderCertificate *senderCertificate) {
+            dispatch_async([OWSDispatch sendingQueue], ^{
+                [self sendMessageToService:message senderCertificate:senderCertificate success:success failure:failure];
+            });
         }
         failure:^(NSError *error) {
-            [futureSource trySetFailure:error];
-        }];
+            OWSLogError(@"Could not obtain UD sender certificate: %@", error);
 
-    return futureSource.future;
+            // Proceed using non-UD message sends.
+            dispatch_async([OWSDispatch sendingQueue], ^{
+                [self sendMessageToService:message senderCertificate:nil success:success failure:failure];
+            });
+        }];
 }
 
-- (void)groupSend:(NSArray<SignalRecipient *> *)recipients
-          message:(TSOutgoingMessage *)message
-           thread:(TSThread *)thread
-          success:(void (^)(void))successHandler
-          failure:(RetryableFailureHandler)failureHandler
+- (nullable NSArray<NSString *> *)unsentRecipientsForMessage:(TSOutgoingMessage *)message
+                                                      thread:(nullable TSThread *)thread
+                                                       error:(NSError **)errorHandle
 {
-    [self saveGroupMessage:message inThread:thread];
-    NSMutableArray<TOCFuture *> *futures = [NSMutableArray array];
+    OWSAssertDebug(message);
+    OWSAssertDebug(errorHandle);
 
-    for (SignalRecipient *recipient in recipients) {
-        NSString *recipientId = recipient.recipientId;
+    NSMutableSet<NSString *> *recipientIds = [NSMutableSet new];
+    if ([message isKindOfClass:[OWSOutgoingSyncMessage class]]) {
+        [recipientIds addObject:self.tsAccountManager.localNumber];
+    } else if (thread.isGroupThread) {
+        TSGroupThread *groupThread = (TSGroupThread *)thread;
 
-        // We don't need to send the message to ourselves...
-        if ([recipientId isEqualToString:[TSAccountManager localNumber]]) {
-            continue;
+        // Send to the intersection of:
+        //
+        // * "sending" recipients of the message.
+        // * members of the group.
+        //
+        // I.e. try to send a message IFF:
+        //
+        // * The recipient was in the group when the message was first tried to be sent.
+        // * The recipient is still in the group.
+        // * The recipient is in the "sending" state.
+
+        [recipientIds addObjectsFromArray:message.sendingRecipientIds];
+        // Only send to members in the latest known group member list.
+        [recipientIds intersectSet:[NSSet setWithArray:groupThread.groupModel.groupMemberIds]];
+
+        if ([recipientIds containsObject:self.tsAccountManager.localNumber]) {
+            OWSFailDebug(@"Message send recipients should not include self.");
         }
-        // We don't need to sent the message to all group members if
-        // it has a "single group recipient".
-        if (message.singleGroupRecipient && ![message.singleGroupRecipient isEqualToString:recipientId]) {
-            continue;
-        }
-        if ([message wasSentToRecipient:recipientId]) {
-            // Skip recipients we have already sent this message to (on an
-            // earlier retry, perhaps).
-            DDLogInfo(@"%@ Skipping group message recipient; already sent: %@", self.logTag, recipient.uniqueId);
-            continue;
+    } else if ([thread isKindOfClass:[TSContactThread class]]) {
+        NSString *recipientContactId = ((TSContactThread *)thread).contactIdentifier;
+
+        // Treat 1:1 sends to blocked contacts as failures.
+        // If we block a user, don't send 1:1 messages to them. The UI
+        // should prevent this from occurring, but in some edge cases
+        // you might, for example, have a pending outgoing message when
+        // you block them.
+        OWSAssertDebug(recipientContactId.length > 0);
+        if ([self.blockingManager isRecipientIdBlocked:recipientContactId]) {
+            OWSLogInfo(@"skipping 1:1 send to blocked contact: %@", recipientContactId);
+            NSError *error = OWSErrorMakeMessageSendFailedDueToBlockListError();
+            [error setIsRetryable:NO];
+            *errorHandle = error;
+            return nil;
         }
 
-        // ...otherwise we send.
-        [futures addObject:[self sendMessageFuture:message recipient:recipient thread:thread]];
+        [recipientIds addObject:recipientContactId];
+
+        if ([recipientIds containsObject:self.tsAccountManager.localNumber]) {
+            OWSFailDebug(@"Message send recipients should not include self.");
+        }
+    } else {
+        // Neither a group nor contact thread? This should never happen.
+        OWSFailDebug(@"Unknown message type: %@", [message class]);
+        NSError *error = OWSErrorMakeFailedToSendOutgoingMessageError();
+        [error setIsRetryable:NO];
+        *errorHandle = error;
+        return nil;
     }
 
-    TOCFuture *completionFuture = futures.toc_thenAll;
+    [recipientIds minusSet:[NSSet setWithArray:self.blockingManager.blockedPhoneNumbers]];
+    return recipientIds.allObjects;
+}
 
-    [completionFuture thenDo:^(id value) {
-        successHandler();
+- (NSArray<SignalRecipient *> *)recipientsForRecipientIds:(NSArray<NSString *> *)recipientIds
+{
+    OWSAssertDebug(recipientIds.count > 0);
+
+    NSMutableArray<SignalRecipient *> *recipients = [NSMutableArray new];
+    [self.dbConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
+        for (NSString *recipientId in recipientIds) {
+            SignalRecipient *recipient =
+                [SignalRecipient getOrBuildUnsavedRecipientForRecipientId:recipientId transaction:transaction];
+            [recipients addObject:recipient];
+        }
     }];
+    return [recipients copy];
+}
 
-    [completionFuture catchDo:^(id failure) {
-        // failure from toc_thenAll yields an array of failed Futures, rather than the future's failure.
+- (AnyPromise *)sendPromiseForRecipients:(NSArray<SignalRecipient *> *)recipients
+                                 message:(TSOutgoingMessage *)message
+                                  thread:(nullable TSThread *)thread
+                       senderCertificate:(nullable SMKSenderCertificate *)senderCertificate
+                              sendErrors:(NSMutableArray<NSError *> *)sendErrors
+{
+    OWSAssertDebug(recipients.count > 0);
+    OWSAssertDebug(message);
+    OWSAssertDebug(sendErrors);
+
+    NSMutableArray<AnyPromise *> *sendPromises = [NSMutableArray array];
+
+    for (SignalRecipient *recipient in recipients) {
+        // Use chained promises to make the code more readable.
+        AnyPromise *sendPromise = [AnyPromise promiseWithResolverBlock:^(PMKResolver resolve) {
+            NSString *localNumber = self.tsAccountManager.localNumber;
+            OWSUDAccess *_Nullable theirUDAccess;
+            if (senderCertificate != nil && ![recipient.recipientId isEqualToString:localNumber]) {
+                theirUDAccess = [self.udManager udAccessForRecipientId:recipient.recipientId requireSyncAccess:YES];
+            }
+
+            OWSMessageSend *messageSend = [[OWSMessageSend alloc] initWithMessage:message
+                thread:thread
+                recipient:recipient
+                senderCertificate:senderCertificate
+                udAccess:theirUDAccess
+                localNumber:self.tsAccountManager.localNumber
+                success:^{
+                    // The value doesn't matter, we just need any non-NSError value.
+                    resolve(@(1));
+                }
+                failure:^(NSError *error) {
+                    @synchronized(sendErrors) {
+                        [sendErrors addObject:error];
+                    }
+                    resolve(error);
+                }];
+            [self sendMessageToRecipient:messageSend];
+        }];
+        [sendPromises addObject:sendPromise];
+    }
+
+    // We use PMKJoin(), not PMKWhen(), because we don't want the
+    // completion promise to execute until _all_ send promises
+    // have either succeeded or failed. PMKWhen() executes as
+    // soon as any of its input promises fail.
+    return PMKJoin(sendPromises);
+}
+
+- (void)sendMessageToService:(TSOutgoingMessage *)message
+           senderCertificate:(nullable SMKSenderCertificate *)senderCertificate
+                     success:(void (^)(void))successHandlerParam
+                     failure:(RetryableFailureHandler)failureHandlerParam
+{
+    AssertIsOnSendingQueue();
+
+    void (^successHandler)(void) = ^() {
+        dispatch_async([OWSDispatch sendingQueue], ^{
+            [self handleMessageSentLocally:message
+                success:^{
+                    successHandlerParam();
+                }
+                failure:^(NSError *error) {
+                    OWSLogError(@"Error sending sync message for message: %@ timestamp: %llu",
+                        message.class,
+                        message.timestamp);
+
+                    failureHandlerParam(error);
+                }];
+        });
+    };
+    void (^failureHandler)(NSError *) = ^(NSError *error) {
+        if (message.wasSentToAnyRecipient) {
+            dispatch_async([OWSDispatch sendingQueue], ^{
+                [self handleMessageSentLocally:message
+                    success:^{
+                        failureHandlerParam(error);
+                    }
+                    failure:^(NSError *syncError) {
+                        OWSLogError(@"Error sending sync message for message: %@ timestamp: %llu, %@",
+                            message.class,
+                            message.timestamp,
+                            syncError);
+
+                        // Discard the "sync message" error in favor of the
+                        // original error.
+                        failureHandlerParam(error);
+                    }];
+            });
+            return;
+        }
+        failureHandlerParam(error);
+    };
+
+    TSThread *_Nullable thread = message.thread;
+
+    BOOL isSyncMessage = [message isKindOfClass:[OWSOutgoingSyncMessage class]];
+    if (!thread && !isSyncMessage) {
+        OWSFailDebug(@"Missing thread for non-sync message.");
+
+        // This thread has been deleted since the message was enqueued.
+        NSError *error = OWSErrorWithCodeDescription(OWSErrorCodeMessageSendNoValidRecipients,
+            NSLocalizedString(@"ERROR_DESCRIPTION_NO_VALID_RECIPIENTS",
+                @"Error indicating that an outgoing message had no valid recipients."));
+        [error setIsRetryable:NO];
+        return failureHandler(error);
+    }
+
+    // In the "self-send" special case, we ony need to send a sync message with a delivery receipt.
+    if ([thread isKindOfClass:[TSContactThread class]] &&
+        [((TSContactThread *)thread).contactIdentifier isEqualToString:self.tsAccountManager.localNumber]) {
+        // Send to self.
+        OWSAssertDebug(message.recipientIds.count == 1);
+        // Don't mark self-sent messages as read (or sent) until the sync transcript is sent.
+        successHandler();
+        return;
+    }
+
+    if (thread.isGroupThread) {
+        [self saveInfoMessageForGroupMessage:message inThread:thread];
+    }
+
+    NSError *error;
+    NSArray<NSString *> *_Nullable recipientIds = [self unsentRecipientsForMessage:message thread:thread error:&error];
+    if (error || !recipientIds) {
+        error = SSKEnsureError(
+            error, OWSErrorCodeMessageSendNoValidRecipients, @"Could not build recipients list for message.");
+        [error setIsRetryable:NO];
+        return failureHandler(error);
+    }
+
+    // Mark skipped recipients as such.  We skip because:
+    //
+    // * Recipient is no longer in the group.
+    // * Recipient is blocked.
+    //
+    // Elsewhere, we skip recipient if their Signal account has been deactivated.
+    NSMutableSet<NSString *> *obsoleteRecipientIds = [NSMutableSet setWithArray:message.sendingRecipientIds];
+    [obsoleteRecipientIds minusSet:[NSSet setWithArray:recipientIds]];
+    if (obsoleteRecipientIds.count > 0) {
+        [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+            for (NSString *recipientId in obsoleteRecipientIds) {
+                // Mark this recipient as "skipped".
+                [message updateWithSkippedRecipient:recipientId transaction:transaction];
+            }
+        }];
+    }
+
+    if (recipientIds.count < 1) {
+        // All recipients are already sent or can be skipped.
+        successHandler();
+        return;
+    }
+
+    NSArray<SignalRecipient *> *recipients = [self recipientsForRecipientIds:recipientIds];
+
+    BOOL isGroupSend = (thread && thread.isGroupThread);
+    NSMutableArray<NSError *> *sendErrors = [NSMutableArray array];
+    AnyPromise *sendPromise = [self sendPromiseForRecipients:recipients
+                                                     message:message
+                                                      thread:thread
+                                           senderCertificate:senderCertificate
+                                                  sendErrors:sendErrors]
+                                  .then(^(id value) {
+                                      successHandler();
+                                  });
+    sendPromise.catch(^(id failure) {
         NSError *firstRetryableError = nil;
         NSError *firstNonRetryableError = nil;
 
-        if ([failure isKindOfClass:[NSArray class]]) {
-            NSArray *groupSendFutures = (NSArray *)failure;
-            for (TOCFuture *groupSendFuture in groupSendFutures) {
-                if (groupSendFuture.hasFailed) {
-                    id failureResult = groupSendFuture.forceGetFailure;
-                    if ([failureResult isKindOfClass:[NSError class]]) {
-                        NSError *error = failureResult;
+        NSArray<NSError *> *sendErrorsCopy;
+        @synchronized(sendErrors) {
+            sendErrorsCopy = [sendErrors copy];
+        }
 
-                        // Some errors should be ignored when sending messages
-                        // to groups.  See discussion on
-                        // NSError (OWSMessageSender) category.
-                        if ([error shouldBeIgnoredForGroups]) {
-                            continue;
-                        }
+        for (NSError *error in sendErrorsCopy) {
+            // Some errors should be ignored when sending messages
+            // to groups.  See discussion on
+            // NSError (OWSMessageSender) category.
+            if (isGroupSend && [error shouldBeIgnoredForGroups]) {
+                continue;
+            }
 
-                        // Some errors should never be retried, in order to avoid
-                        // hitting rate limits, for example.  Unfortunately, since
-                        // group send retry is all-or-nothing, we need to fail
-                        // immediately even if some of the other recipients had
-                        // retryable errors.
-                        if ([error isFatal]) {
-                            failureHandler(error);
-                            return;
-                        }
+            // Some errors should never be retried, in order to avoid
+            // hitting rate limits, for example.  Unfortunately, since
+            // group send retry is all-or-nothing, we need to fail
+            // immediately even if some of the other recipients had
+            // retryable errors.
+            if ([error isFatal]) {
+                failureHandler(error);
+                return;
+            }
 
-                        if ([error isRetryable] && !firstRetryableError) {
-                            firstRetryableError = error;
-                        } else if (![error isRetryable] && !firstNonRetryableError) {
-                            firstNonRetryableError = error;
-                        }
-                    }
-                }
+            if ([error isRetryable] && !firstRetryableError) {
+                firstRetryableError = error;
+            } else if (![error isRetryable] && !firstNonRetryableError) {
+                firstNonRetryableError = error;
             }
         }
 
-        // If any of the group send errors are retryable, we want to retry.
+        // If any of the send errors are retryable, we want to retry.
         // Therefore, prefer to propagate a retryable error.
         if (firstRetryableError) {
             return failureHandler(firstRetryableError);
@@ -783,71 +831,60 @@ NSString *const OWSMessageSenderRateLimitedException = @"RateLimitedException";
                 successHandler();
             }
         }
-    }];
+    });
+    [sendPromise retainUntilComplete];
 }
 
 - (void)unregisteredRecipient:(SignalRecipient *)recipient
                       message:(TSOutgoingMessage *)message
                        thread:(TSThread *)thread
 {
-    [self.dbConnection asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-        [recipient removeWithTransaction:transaction];
-        [[TSInfoMessage userNotRegisteredMessageInThread:thread]
+    [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+        if (thread.isGroupThread) {
+            // Mark as "skipped" group members who no longer have signal accounts.
+            [message updateWithSkippedRecipient:recipient.recipientId transaction:transaction];
+        }
+
+        if (![SignalRecipient isRegisteredRecipient:recipient.recipientId transaction:transaction]) {
+            return;
+        }
+
+        [SignalRecipient markRecipientAsUnregistered:recipient.recipientId transaction:transaction];
+
+        [[TSInfoMessage userNotRegisteredMessageInThread:thread recipientId:recipient.recipientId]
             saveWithTransaction:transaction];
+
+        // TODO: Should we deleteAllSessionsForContact here?
+        //       If so, we'll need to avoid doing a prekey fetch every
+        //       time we try to send a message to an unregistered user.
     }];
 }
 
-- (void)sendMessageToService:(TSOutgoingMessage *)message
-                   recipient:(SignalRecipient *)recipient
-                      thread:(TSThread *)thread
-                    attempts:(int)remainingAttempts
-                     success:(void (^)(void))successHandler
-                     failure:(RetryableFailureHandler)failureHandler
+- (nullable NSArray<NSDictionary *> *)deviceMessagesForMessageSend:(OWSMessageSend *)messageSend
+                                                             error:(NSError **)errorHandle
 {
-    DDLogInfo(@"%@ attempting to send message: %@, timestamp: %llu, recipient: %@",
-        self.logTag,
-        message.class,
-        message.timestamp,
-        recipient.uniqueId);
+    OWSAssertDebug(messageSend);
+    OWSAssertDebug(errorHandle);
     AssertIsOnSendingQueue();
 
-    if ([TSPreKeyManager isAppLockedDueToPreKeyUpdateFailures]) {
-        OWSProdError([OWSAnalyticsEvents messageSendErrorFailedDueToPrekeyUpdateFailures]);
-
-        // Retry prekey update every time user tries to send a message while app
-        // is disabled due to prekey update failures.
-        //
-        // Only try to update the signed prekey; updating it is sufficient to
-        // re-enable message sending.
-        [TSPreKeyManager registerPreKeysWithMode:RefreshPreKeysMode_SignedOnly
-            success:^{
-                DDLogInfo(@"%@ New prekeys registered with server.", self.logTag);
-            }
-            failure:^(NSError *error) {
-                DDLogWarn(@"%@ Failed to update prekeys with the server: %@", self.logTag, error);
-            }];
-
-        NSError *error = OWSErrorMakeMessageSendDisabledDueToPreKeyUpdateFailuresError();
-        [error setIsRetryable:YES];
-        return failureHandler(error);
-    }
-
-    if (remainingAttempts <= 0) {
-        // We should always fail with a specific error.
-        OWSProdFail([OWSAnalyticsEvents messageSenderErrorGenericSendFailure]);
-
-        NSError *error = OWSErrorMakeFailedToSendOutgoingMessageError();
-        [error setIsRetryable:YES];
-        return failureHandler(error);
-    }
-    remainingAttempts -= 1;
+    SignalRecipient *recipient = messageSend.recipient;
 
     NSArray<NSDictionary *> *deviceMessages;
     @try {
-        deviceMessages = [self deviceMessages:message forRecipient:recipient];
+        deviceMessages = [self throws_deviceMessagesForMessageSend:messageSend];
     } @catch (NSException *exception) {
-        deviceMessages = @[];
-        if ([exception.name isEqualToString:UntrustedIdentityKeyException]) {
+        if ([exception.name isEqualToString:NoSessionForTransientMessageException]) {
+            // When users re-register, we don't want transient messages (like typing
+            // indicators) to cause users to hit the prekey fetch rate limit.  So
+            // we silently discard these message if there is no pre-existing session
+            // for the recipient.
+            NSError *error = OWSErrorWithCodeDescription(
+                OWSErrorCodeNoSessionForTransientMessage, @"No session for transient message.");
+            [error setIsRetryable:NO];
+            [error setIsFatal:YES];
+            *errorHandle = error;
+            return nil;
+        } else if ([exception.name isEqualToString:UntrustedIdentityKeyException]) {
             // This *can* happen under normal usage, but it should happen relatively rarely.
             // We expect it to happen whenever Bob reinstalls, and Alice messages Bob before
             // she can pull down his latest identity.
@@ -868,71 +905,126 @@ NSString *const OWSMessageSenderRateLimitedException = @"RateLimitedException";
             [error setIsRetryable:NO];
             // Avoid the "Too many failures with this contact" error rate limiting.
             [error setIsFatal:YES];
+            *errorHandle = error;
 
             PreKeyBundle *_Nullable newKeyBundle = exception.userInfo[TSInvalidPreKeyBundleKey];
             if (newKeyBundle == nil) {
                 OWSProdFail([OWSAnalyticsEvents messageSenderErrorMissingNewPreKeyBundle]);
-                failureHandler(error);
-                return;
+                return nil;
             }
 
             if (![newKeyBundle isKindOfClass:[PreKeyBundle class]]) {
                 OWSProdFail([OWSAnalyticsEvents messageSenderErrorUnexpectedKeyBundle]);
-                failureHandler(error);
-                return;
+                return nil;
             }
 
             NSData *newIdentityKeyWithVersion = newKeyBundle.identityKey;
 
             if (![newIdentityKeyWithVersion isKindOfClass:[NSData class]]) {
                 OWSProdFail([OWSAnalyticsEvents messageSenderErrorInvalidIdentityKeyType]);
-                failureHandler(error);
-                return;
+                return nil;
             }
 
             // TODO migrate to storing the full 33 byte representation of the identity key.
             if (newIdentityKeyWithVersion.length != kIdentityKeyLength) {
                 OWSProdFail([OWSAnalyticsEvents messageSenderErrorInvalidIdentityKeyLength]);
-                failureHandler(error);
-                return;
+                return nil;
             }
 
-            NSData *newIdentityKey = [newIdentityKeyWithVersion removeKeyType];
+            NSData *newIdentityKey = [newIdentityKeyWithVersion throws_removeKeyType];
+            [self.identityManager saveRemoteIdentity:newIdentityKey recipientId:recipient.recipientId];
 
-            [[OWSIdentityManager sharedManager] saveRemoteIdentity:newIdentityKey recipientId:recipient.recipientId];
-
-            failureHandler(error);
-            return;
+            return nil;
         }
 
         if ([exception.name isEqualToString:OWSMessageSenderRateLimitedException]) {
             NSError *error = OWSErrorWithCodeDescription(OWSErrorCodeSignalServiceRateLimited,
                 NSLocalizedString(@"FAILED_SENDING_BECAUSE_RATE_LIMIT",
                     @"action sheet header when re-sending message which failed because of too many attempts"));
-
             // We're already rate-limited. No need to exacerbate the problem.
             [error setIsRetryable:NO];
             // Avoid exacerbating the rate limiting.
             [error setIsFatal:YES];
-            return failureHandler(error);
+            *errorHandle = error;
+            return nil;
         }
 
-        if (remainingAttempts == 0) {
-            DDLogWarn(@"%@ Terminal failure to build any device messages. Giving up with exception:%@",
-                self.logTag,
-                exception);
-            NSError *error = OWSErrorMakeFailedToSendOutgoingMessageError();
-            // Since we've already repeatedly failed to build messages, it's unlikely that repeating the whole process
-            // will succeed.
-            [error setIsRetryable:NO];
-            return failureHandler(error);
-        }
+        OWSLogWarn(@"Could not build device messages: %@", exception);
+        NSError *error = OWSErrorMakeFailedToSendOutgoingMessageError();
+        [error setIsRetryable:YES];
+        *errorHandle = error;
+        return nil;
     }
 
-    NSString *localNumber = [TSAccountManager localNumber];
-    if ([localNumber isEqualToString:recipient.uniqueId]) {
-        OWSAssert([message isKindOfClass:[OWSOutgoingSyncMessage class]]);
-        // Messages send to the "local number" should be sync messages.
+    return deviceMessages;
+}
+
+- (void)sendMessageToRecipient:(OWSMessageSend *)messageSend
+{
+    OWSAssertDebug(messageSend);
+    OWSAssertDebug(messageSend.thread || [messageSend.message isKindOfClass:[OWSOutgoingSyncMessage class]]);
+
+    TSOutgoingMessage *message = messageSend.message;
+    SignalRecipient *recipient = messageSend.recipient;
+
+    OWSLogInfo(@"attempting to send message: %@, timestamp: %llu, recipient: %@",
+        message.class,
+        message.timestamp,
+        recipient.uniqueId);
+    AssertIsOnSendingQueue();
+
+    if ([TSPreKeyManager isAppLockedDueToPreKeyUpdateFailures]) {
+        OWSProdError([OWSAnalyticsEvents messageSendErrorFailedDueToPrekeyUpdateFailures]);
+
+        // Retry prekey update every time user tries to send a message while app
+        // is disabled due to prekey update failures.
+        //
+        // Only try to update the signed prekey; updating it is sufficient to
+        // re-enable message sending.
+        [TSPreKeyManager
+            rotateSignedPreKeyWithSuccess:^{
+                OWSLogInfo(@"New prekeys registered with server.");
+                NSError *error = OWSErrorMakeMessageSendDisabledDueToPreKeyUpdateFailuresError();
+                [error setIsRetryable:YES];
+                return messageSend.failure(error);
+            }
+            failure:^(NSError *error) {
+                OWSLogWarn(@"Failed to update prekeys with the server: %@", error);
+                return messageSend.failure(error);
+            }];
+    }
+
+    if (messageSend.remainingAttempts <= 0) {
+        // We should always fail with a specific error.
+        OWSProdFail([OWSAnalyticsEvents messageSenderErrorGenericSendFailure]);
+
+        NSError *error = OWSErrorMakeFailedToSendOutgoingMessageError();
+        [error setIsRetryable:YES];
+        return messageSend.failure(error);
+    }
+
+    // Consume an attempt.
+    messageSend.remainingAttempts = messageSend.remainingAttempts - 1;
+
+    // We need to disable UD for sync messages before we build the device messages,
+    // since we don't want to build a device message for the local device in the
+    // non-UD auth case.
+    if ([message isKindOfClass:[OWSOutgoingSyncMessage class]]
+        && ![message isKindOfClass:[OWSOutgoingSentMessageTranscript class]]) {
+        [messageSend disableUD];
+    }
+
+    NSError *deviceMessagesError;
+    NSArray<NSDictionary *> *_Nullable deviceMessages =
+        [self deviceMessagesForMessageSend:messageSend error:&deviceMessagesError];
+    if (deviceMessagesError || !deviceMessages) {
+        OWSAssertDebug(deviceMessagesError);
+        return messageSend.failure(deviceMessagesError);
+    }
+
+    if (messageSend.isLocalNumber) {
+        OWSAssertDebug([message isKindOfClass:[OWSOutgoingSyncMessage class]]);
+        // Messages sent to the "local number" should be sync messages.
         //
         // We can skip sending sync messages if we know that we have no linked
         // devices. However, we need to be sure to handle the case where the
@@ -946,329 +1038,533 @@ NSString *const OWSMessageSenderRateLimitedException = @"RateLimitedException";
         //
         // If _both_ of these pieces of state agree that there are no linked
         // devices, then can safely skip sending sync message.
+        //
+        // NOTE: Sync messages sent via UD include the local device.
 
-        // 1. Check OWSDevice's state.
         BOOL mayHaveLinkedDevices = [OWSDeviceManager.sharedManager mayHaveLinkedDevices:self.dbConnection];
 
-        // 2. Check SignalRecipient's state.
-        BOOL hasDeviceMessages = deviceMessages.count > 0;
+        BOOL hasDeviceMessages = NO;
+        for (NSDictionary<NSString *, id> *deviceMessage in deviceMessages) {
+            NSString *_Nullable destination = deviceMessage[@"destination"];
+            if (!destination) {
+                OWSFailDebug(@"Sync device message missing destination: %@", deviceMessage);
+                continue;
+            }
+            if (![destination isEqualToString:messageSend.localNumber]) {
+                OWSFailDebug(@"Sync device message has invalid destination: %@", deviceMessage);
+                continue;
+            }
+            NSNumber *_Nullable destinationDeviceId = deviceMessage[@"destinationDeviceId"];
+            if (!destinationDeviceId) {
+                OWSFailDebug(@"Sync device message missing destination device id: %@", deviceMessage);
+                continue;
+            }
+            if (destinationDeviceId.intValue != OWSDevicePrimaryDeviceId) {
+                hasDeviceMessages = YES;
+                break;
+            }
+        }
+
+        OWSLogInfo(@"mayHaveLinkedDevices: %d, hasDeviceMessages: %d", mayHaveLinkedDevices, hasDeviceMessages);
 
         if (!mayHaveLinkedDevices && !hasDeviceMessages) {
-            DDLogInfo(@"%@ Ignoring sync message without secondary devices: %@", self.logTag, [message class]);
-            OWSAssert([message isKindOfClass:[OWSOutgoingSyncMessage class]]);
+            OWSLogInfo(@"Ignoring sync message without secondary devices: %@", [message class]);
+            OWSAssertDebug([message isKindOfClass:[OWSOutgoingSyncMessage class]]);
 
             dispatch_async([OWSDispatch sendingQueue], ^{
-                // This emulates the completion logic of an actual successful save (see below).
-                [recipient save];
-                successHandler();
+                // This emulates the completion logic of an actual successful send (see below).
+                [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+                    [message updateWithSkippedRecipient:messageSend.localNumber transaction:transaction];
+                }];
+                messageSend.success();
             });
 
             return;
-        } else if (mayHaveLinkedDevices) {
+        } else if (mayHaveLinkedDevices && !hasDeviceMessages) {
             // We may have just linked a new secondary device which is not yet reflected in
             // the SignalRecipient that corresponds to ourself.  Proceed.  Client should learn
             // of new secondary devices via 409 "Mismatched devices" response.
-            DDLogWarn(@"%@ sync message has no device messages but account has secondary devices.", self.logTag);
-        } else if (hasDeviceMessages) {
-            OWSFail(@"%@ sync message has device messages for unknown secondary devices.", self.logTag);
-        } else {
-            // Account has secondary devices; proceed as usual.
+            OWSLogWarn(@"account has secondary devices, but sync message has no device messages");
+        } else if (!mayHaveLinkedDevices && hasDeviceMessages) {
+            OWSFailDebug(@"sync message has device messages for unknown secondary devices.");
         }
     } else {
-        OWSAssert(deviceMessages.count > 0);
+        // This can happen for users who have unregistered.
+        // We still want to try sending to them in case they have re-registered.
+        if (deviceMessages.count < 1) {
+            OWSLogWarn(@"Message send attempt with no device messages.");
+        }
     }
 
-    TSSubmitMessageRequest *request = [[TSSubmitMessageRequest alloc] initWithRecipient:recipient.uniqueId
-                                                                               messages:deviceMessages
-                                                                                  relay:recipient.relay
-                                                                              timeStamp:message.timestamp];
-
-    [self.networkManager makeRequest:request
-        success:^(NSURLSessionDataTask *task, id responseObject) {
-            dispatch_async([OWSDispatch sendingQueue], ^{
-                [recipient save];
-                [self handleMessageSentLocally:message];
-                successHandler();
-            });
+    for (NSDictionary *deviceMessage in deviceMessages) {
+        NSNumber *_Nullable messageType = deviceMessage[@"type"];
+        OWSAssertDebug(messageType);
+        BOOL hasValidMessageType;
+        if (messageSend.isUDSend) {
+            hasValidMessageType = [messageType isEqualToNumber:@(TSUnidentifiedSenderMessageType)];
+        } else {
+            hasValidMessageType = ([messageType isEqualToNumber:@(TSEncryptedWhisperMessageType)] ||
+                [messageType isEqualToNumber:@(TSPreKeyWhisperMessageType)]);
         }
-        failure:^(NSURLSessionDataTask *task, NSError *error) {
-            DDLogInfo(@"%@ sending to recipient: %@, failed with error: %@", self.logTag, recipient.uniqueId, error);
-            [DDLog flushLog];
 
-            NSHTTPURLResponse *response = (NSHTTPURLResponse *)task.response;
-            long statuscode = response.statusCode;
-            NSData *responseData = error.userInfo[AFNetworkingOperationFailingURLResponseDataErrorKey];
+        if (!hasValidMessageType) {
+            OWSFailDebug(@"Invalid message type: %@", messageType);
+            NSError *error = OWSErrorMakeFailedToSendOutgoingMessageError();
+            [error setIsRetryable:NO];
+            return messageSend.failure(error);
+        }
+    }
 
-            void (^retrySend)(void) = ^void() {
-                if (remainingAttempts <= 0) {
-                    // Since we've already repeatedly failed to send to the messaging API,
-                    // it's unlikely that repeating the whole process will succeed.
-                    [error setIsRetryable:NO];
-                    return failureHandler(error);
-                }
+    if (deviceMessages.count == 0) {
+        // This might happen:
+        //
+        // * The first (after upgrading?) time we send a sync message to our linked devices.
+        // * After unlinking all linked devices.
+        // * After trying and failing to link a device.
+        // * The first time we send a message to a user, if they don't have their
+        //   default device.  For example, if they have unregistered
+        //   their primary but still have a linked device. Or later, when they re-register.
+        //
+        // When we're not sure if we have linked devices, we need to try
+        // to send self-sync messages even if they have no device messages
+        // so that we can learn from the service whether or not there are
+        // linked devices that we don't know about.
+        OWSLogWarn(@"Sending a message with no device messages.");
+    }
 
+    OWSRequestMaker *requestMaker = [[OWSRequestMaker alloc] initWithLabel:@"Message Send"
+        requestFactoryBlock:^(SMKUDAccessKey *_Nullable udAccessKey) {
+            return [OWSRequestFactory submitMessageRequestWithRecipient:recipient.recipientId
+                                                               messages:deviceMessages
+                                                              timeStamp:message.timestamp
+                                                            udAccessKey:udAccessKey];
+        }
+        udAuthFailureBlock:^{
+            // Note the UD auth failure so subsequent retries
+            // to this recipient also use basic auth.
+            [messageSend setHasUDAuthFailed];
+        }
+        websocketFailureBlock:^{
+            // Note the websocket failure so subsequent retries
+            // to this recipient also use REST.
+            messageSend.hasWebsocketSendFailed = YES;
+        }
+        recipientId:recipient.recipientId
+        udAccess:messageSend.udAccess
+        canFailoverUDAuth:NO];
+    [[requestMaker makeRequestObjc]
+            .then(^(OWSRequestMakerResult *result) {
                 dispatch_async([OWSDispatch sendingQueue], ^{
-                    DDLogDebug(@"%@ Retrying: %@", self.logTag, message.debugDescription);
-                    [self sendMessageToService:message
-                                     recipient:recipient
-                                        thread:thread
-                                      attempts:remainingAttempts
-                                       success:successHandler
-                                       failure:failureHandler];
+                    [self messageSendDidSucceed:messageSend
+                                 deviceMessages:deviceMessages
+                                    wasSentByUD:result.wasSentByUD
+                             wasSentByWebsocket:result.wasSentByWebsocket];
                 });
-            };
-
-            switch (statuscode) {
-                case 401: {
-                    DDLogWarn(@"%@ Unable to send due to invalid credentials. Did the user's client get de-authed by "
-                              @"registering elsewhere?",
-                        self.logTag);
-                    NSError *error = OWSErrorWithCodeDescription(OWSErrorCodeSignalServiceFailure, NSLocalizedString(@"ERROR_DESCRIPTION_SENDING_UNAUTHORIZED", @"Error message when attempting to send message"));
-                    // No need to retry if we've been de-authed.
-                    [error setIsRetryable:NO];
-                    return failureHandler(error);
-                }
-                case 404: {
-                    DDLogWarn(@"%@ Unregistered recipient: %@", self.logTag, recipient.uniqueId);
-
-                    [self unregisteredRecipient:recipient message:message thread:thread];
-                    NSError *error = OWSErrorMakeNoSuchSignalRecipientError();
-                    // No need to retry if the recipient is not registered.
-                    [error setIsRetryable:NO];
-                    // If one member of a group deletes their account,
-                    // the group should ignore errors when trying to send
-                    // messages to this ex-member.
-                    [error setShouldBeIgnoredForGroups:YES];
-                    return failureHandler(error);
-                }
-                case 409: {
-                    // Mismatched devices
-                    DDLogWarn(@"%@ Mismatch Devices for recipient: %@", self.logTag, recipient.uniqueId);
-
-                    NSError *error;
-                    NSDictionary *serializedResponse =
-                        [NSJSONSerialization JSONObjectWithData:responseData options:0 error:&error];
-                    if (error) {
-                        OWSProdError([OWSAnalyticsEvents messageSenderErrorCouldNotParseMismatchedDevicesJson]);
+            })
+            .catch(^(NSError *error) {
+                dispatch_async([OWSDispatch sendingQueue], ^{
+                    NSUInteger statusCode = 0;
+                    NSData *_Nullable responseData = nil;
+                    if ([error.domain isEqualToString:@"SignalServiceKit.RequestMakerUDAuthError"]) {
+                        // Try again.
+                        OWSLogInfo(@"UD request auth failed; failing over to non-UD request.");
                         [error setIsRetryable:YES];
-                        return failureHandler(error);
+                    } else if ([error.domain isEqualToString:TSNetworkManagerErrorDomain]) {
+                        statusCode = error.code;
+
+                        NSError *_Nullable underlyingError = error.userInfo[NSUnderlyingErrorKey];
+                        if (underlyingError) {
+                            responseData
+                                = underlyingError.userInfo[AFNetworkingOperationFailingURLResponseDataErrorKey];
+                        } else {
+                            OWSFailDebug(@"Missing underlying error: %@", error);
+                        }
+                    } else {
+                        OWSFailDebug(@"Unexpected error: %@", error);
                     }
 
-                    [self handleMismatchedDevices:serializedResponse recipient:recipient completion:retrySend];
-                    break;
-                }
-                case 410: {
-                    // Stale devices
-                    DDLogWarn(@"%@ Stale devices for recipient: %@", self.logTag, recipient.uniqueId);
-
-                    if (!responseData) {
-                        DDLogWarn(@"Stale devices but server didn't specify devices in response.");
-                        NSError *error = OWSErrorMakeUnableToProcessServerResponseError();
-                        [error setIsRetryable:YES];
-                        return failureHandler(error);
-                    }
-
-                    [self handleStaleDevicesWithResponse:responseData
-                                             recipientId:recipient.uniqueId
-                                              completion:retrySend];
-                    break;
-                }
-                default:
-                    retrySend();
-                    break;
-            }
-        }];
+                    [self messageSendDidFail:messageSend
+                              deviceMessages:deviceMessages
+                                  statusCode:statusCode
+                                       error:error
+                                responseData:responseData];
+                });
+            }) retainUntilComplete];
 }
 
-- (void)handleMismatchedDevices:(NSDictionary *)dictionary
-                      recipient:(SignalRecipient *)recipient
-                     completion:(void (^)(void))completionHandler
+- (void)messageSendDidSucceed:(OWSMessageSend *)messageSend
+               deviceMessages:(NSArray<NSDictionary *> *)deviceMessages
+                  wasSentByUD:(BOOL)wasSentByUD
+           wasSentByWebsocket:(BOOL)wasSentByWebsocket
 {
-    NSArray *extraDevices = [dictionary objectForKey:@"extraDevices"];
-    NSArray *missingDevices = [dictionary objectForKey:@"missingDevices"];
+    OWSAssertDebug(messageSend);
+    OWSAssertDebug(deviceMessages);
 
-    if (missingDevices.count > 0) {
-        NSString *localNumber = [TSAccountManager localNumber];
-        if ([localNumber isEqualToString:recipient.uniqueId]) {
-            [OWSDeviceManager.sharedManager setMayHaveLinkedDevices:YES dbConnection:self.dbConnection];
-        }
+    SignalRecipient *recipient = messageSend.recipient;
+
+    OWSLogInfo(@"successfully sent message: %@ timestamp: %llu, wasSentByUD: %d",
+               messageSend.message.class, messageSend.message.timestamp, wasSentByUD);
+
+    if (messageSend.isLocalNumber && deviceMessages.count == 0) {
+        OWSLogInfo(@"Sent a message with no device messages; clearing 'mayHaveLinkedDevices'.");
+        // In order to avoid skipping necessary sync messages, the default value
+        // for mayHaveLinkedDevices is YES.  Once we've successfully sent a
+        // sync message with no device messages (e.g. the service has confirmed
+        // that we have no linked devices), we can set mayHaveLinkedDevices to NO
+        // to avoid unnecessary message sends for sync messages until we learn
+        // of a linked device (e.g. through the device linking UI or by receiving
+        // a sync message, etc.).
+        [OWSDeviceManager.sharedManager clearMayHaveLinkedDevices];
     }
 
-    dispatch_async([OWSDispatch sessionStoreQueue], ^{
-        if (extraDevices.count < 1 && missingDevices.count < 1) {
-            OWSProdFail([OWSAnalyticsEvents messageSenderErrorNoMissingOrExtraDevices]);
-        }
+    dispatch_async([OWSDispatch sendingQueue], ^{
+        [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+            [messageSend.message updateWithSentRecipient:messageSend.recipient.uniqueId
+                                             wasSentByUD:wasSentByUD
+                                             transaction:transaction];
 
-        if (extraDevices && extraDevices.count > 0) {
-            DDLogInfo(@"%@ removing extra devices: %@", self.logTag, extraDevices);
-            for (NSNumber *extraDeviceId in extraDevices) {
-                [self.storageManager deleteSessionForContact:recipient.uniqueId deviceId:extraDeviceId.intValue];
+            if (transaction.transitional_yapWriteTransaction) {
+                // If we've just delivered a message to a user, we know they
+                // have a valid Signal account.
+                [SignalRecipient markRecipientAsRegisteredAndGet:recipient.recipientId
+                                                     transaction:transaction.transitional_yapWriteTransaction];
             }
+        }];
 
-            [recipient removeDevices:[NSSet setWithArray:extraDevices]];
-        }
-
-        if (missingDevices && missingDevices.count > 0) {
-            DDLogInfo(@"%@ Adding missing devices: %@", self.logTag, missingDevices);
-            [recipient addDevices:[NSSet setWithArray:missingDevices]];
-        }
-
-        [recipient save];
-        completionHandler();
+        messageSend.success();
     });
 }
 
-- (void)handleMessageSentLocally:(TSOutgoingMessage *)message
+- (void)messageSendDidFail:(OWSMessageSend *)messageSend
+            deviceMessages:(NSArray<NSDictionary *> *)deviceMessages
+                statusCode:(NSInteger)statusCode
+                     error:(NSError *)responseError
+              responseData:(nullable NSData *)responseData
 {
-    if (message.shouldSyncTranscript) {
-        // TODO: I suspect we shouldn't optimistically set hasSyncedTranscript.
-        //       We could set this in a success handler for [sendSyncTranscriptForMessage:].
-        [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-            [message updateWithHasSyncedTranscript:YES transaction:transaction];
-        }];
-        [self sendSyncTranscriptForMessage:message];
-    }
+    OWSAssertDebug(messageSend);
+    OWSAssertDebug(messageSend.thread || [messageSend.message isKindOfClass:[OWSOutgoingSyncMessage class]]);
+    OWSAssertDebug(deviceMessages);
+    OWSAssertDebug(responseError);
 
-    [OWSDisappearingMessagesJob setExpirationForMessage:message];
-}
+    TSOutgoingMessage *message = messageSend.message;
+    SignalRecipient *recipient = messageSend.recipient;
 
-- (void)becomeConsistentWithDisappearingConfigurationForMessage:(TSOutgoingMessage *)outgoingMessage
-{
-    [OWSDisappearingMessagesJob becomeConsistentWithConfigurationForMessage:outgoingMessage
-                                                            contactsManager:self.contactsManager];
-}
+    OWSLogInfo(@"failed to send message: %@, timestamp: %llu, to recipient: %@",
+        message.class,
+        message.timestamp,
+        recipient.uniqueId);
 
-- (void)handleSendToMyself:(TSOutgoingMessage *)outgoingMessage
-{
-    [self handleMessageSentLocally:outgoingMessage];
-
-    if (!(outgoingMessage.body || outgoingMessage.hasAttachments)) {
-        DDLogDebug(
-            @"%@ Refusing to make incoming copy of non-standard message sent to self:%@", self.logTag, outgoingMessage);
-        return;
-    }
-
-    // Getting the local number uses a transaction, so we need to do that before we
-    // create a new transaction to avoid deadlock.
-    NSString *contactId = [TSAccountManager localNumber];
-    [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-        TSContactThread *cThread =
-            [TSContactThread getOrCreateThreadWithContactId:contactId transaction:transaction];
-        [cThread saveWithTransaction:transaction];
-
-        // We need to clone any attachments for message sent to self; otherwise deleting
-        // the incoming or outgoing copy of the message will break the other.
-        NSMutableArray<NSString *> *attachmentIds = [NSMutableArray new];
-        for (NSString *attachmentId in outgoingMessage.attachmentIds) {
-            TSAttachmentStream *_Nullable outgoingAttachment =
-                [TSAttachmentStream fetchObjectWithUniqueID:attachmentId transaction:transaction];
-            OWSAssert(outgoingAttachment);
-            if (!outgoingAttachment) {
-                DDLogError(@"%@ Couldn't load outgoing attachment for message sent to self.", self.logTag);
-            } else {
-                TSAttachmentStream *incomingAttachment =
-                    [[TSAttachmentStream alloc] initWithContentType:outgoingAttachment.contentType
-                                                          byteCount:outgoingAttachment.byteCount
-                                                     sourceFilename:outgoingAttachment.sourceFilename];
-                NSError *error;
-                NSData *_Nullable data = [outgoingAttachment readDataFromFileWithError:&error];
-                if (!data || error) {
-                    DDLogError(@"%@ Couldn't load attachment data for message sent to self: %@.", self.logTag, error);
-                } else {
-                    [incomingAttachment writeData:data error:&error];
-                    if (error) {
-                        DDLogError(
-                            @"%@ Couldn't copy attachment data for message sent to self: %@.", self.logTag, error);
-                    } else {
-                        [incomingAttachment saveWithTransaction:transaction];
-                        [attachmentIds addObject:incomingAttachment.uniqueId];
-                    }
-                }
-            }
+    void (^retrySend)(void) = ^void() {
+        if (messageSend.remainingAttempts <= 0) {
+            return messageSend.failure(responseError);
         }
 
-        // We want the incoming message to appear after the outgoing message.
-        TSIncomingMessage *incomingMessage =
-            [[TSIncomingMessage alloc] initWithTimestamp:(outgoingMessage.timestamp + 1)
-                                                inThread:cThread
-                                                authorId:[cThread contactIdentifier]
-                                          sourceDeviceId:[OWSDevice currentDeviceId]
-                                             messageBody:outgoingMessage.body
-                                           attachmentIds:attachmentIds
-                                        expiresInSeconds:outgoingMessage.expiresInSeconds];
-        [incomingMessage saveWithTransaction:transaction];
+        dispatch_async([OWSDispatch sendingQueue], ^{
+            OWSLogDebug(@"Retrying: %@", message.debugDescription);
+            [self sendMessageToRecipient:messageSend];
+        });
+    };
+
+    void (^handle404)(void) = ^{
+        OWSLogWarn(@"Unregistered recipient: %@", recipient.uniqueId);
+
+        dispatch_async([OWSDispatch sendingQueue], ^{
+            if (![messageSend.message isKindOfClass:[OWSOutgoingSyncMessage class]]) {
+                TSThread *_Nullable thread = messageSend.thread;
+                OWSAssertDebug(thread);
+                [self unregisteredRecipient:recipient message:message thread:thread];
+            }
+
+            NSError *error = OWSErrorMakeNoSuchSignalRecipientError();
+            // No need to retry if the recipient is not registered.
+            [error setIsRetryable:NO];
+            // If one member of a group deletes their account,
+            // the group should ignore errors when trying to send
+            // messages to this ex-member.
+            [error setShouldBeIgnoredForGroups:YES];
+            messageSend.failure(error);
+        });
+    };
+
+    switch (statusCode) {
+        case 401: {
+            OWSLogWarn(@"Unable to send due to invalid credentials. Did the user's client get de-authed by "
+                       @"registering elsewhere?");
+            NSError *error = OWSErrorWithCodeDescription(OWSErrorCodeSignalServiceFailure,
+                NSLocalizedString(
+                    @"ERROR_DESCRIPTION_SENDING_UNAUTHORIZED", @"Error message when attempting to send message"));
+            // No need to retry if we've been de-authed.
+            [error setIsRetryable:NO];
+            return messageSend.failure(error);
+        }
+        case 404: {
+            handle404();
+            return;
+        }
+        case 409: {
+            // Mismatched devices
+            OWSLogWarn(@"Mismatched devices for recipient: %@ (%zd)", recipient.uniqueId, deviceMessages.count);
+
+            NSError *_Nullable error = nil;
+            NSDictionary *_Nullable responseJson = nil;
+            if (responseData) {
+                responseJson = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:&error];
+            }
+            if (error || !responseJson) {
+                OWSProdError([OWSAnalyticsEvents messageSenderErrorCouldNotParseMismatchedDevicesJson]);
+                [error setIsRetryable:YES];
+                return messageSend.failure(error);
+            }
+
+            NSNumber *_Nullable errorCode = responseJson[@"code"];
+            if ([@(404) isEqual:errorCode]) {
+                // Some 404s are returned as 409.
+                handle404();
+                return;
+            }
+
+            [self handleMismatchedDevicesWithResponseJson:responseJson recipient:recipient completion:retrySend];
+
+            if (messageSend.isLocalNumber) {
+                // Don't use websocket; it may have obsolete cached state.
+                [messageSend setHasWebsocketSendFailed:YES];
+            }
+
+            break;
+        }
+        case 410: {
+            // Stale devices
+            OWSLogWarn(@"Stale devices for recipient: %@", recipient.uniqueId);
+
+            NSError *_Nullable error = nil;
+            NSDictionary *_Nullable responseJson = nil;
+            if (responseData) {
+                responseJson = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:&error];
+            }
+            if (error || !responseJson) {
+                OWSLogWarn(@"Stale devices but server didn't specify devices in response.");
+                NSError *error = OWSErrorMakeUnableToProcessServerResponseError();
+                [error setIsRetryable:YES];
+                return messageSend.failure(error);
+            }
+
+            [self handleStaleDevicesWithResponseJson:responseJson recipientId:recipient.uniqueId completion:retrySend];
+
+            if (messageSend.isLocalNumber) {
+                // Don't use websocket; it may have obsolete cached state.
+                [messageSend setHasWebsocketSendFailed:YES];
+            }
+
+            break;
+        }
+        default:
+            retrySend();
+            break;
+    }
+}
+
+- (void)handleMismatchedDevicesWithResponseJson:(NSDictionary *)responseJson
+                                      recipient:(SignalRecipient *)recipient
+                                     completion:(void (^)(void))completionHandler
+{
+    OWSAssertDebug(responseJson);
+    OWSAssertDebug(recipient);
+    OWSAssertDebug(completionHandler);
+
+    NSArray *extraDevices = responseJson[@"extraDevices"];
+    NSArray *missingDevices = responseJson[@"missingDevices"];
+
+    if (missingDevices.count > 0) {
+        NSString *localNumber = self.tsAccountManager.localNumber;
+        if ([localNumber isEqualToString:recipient.uniqueId]) {
+            [OWSDeviceManager.sharedManager setMayHaveLinkedDevices];
+        }
+    }
+
+    [self.dbConnection
+        readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+            if (extraDevices.count < 1 && missingDevices.count < 1) {
+                OWSProdFail([OWSAnalyticsEvents messageSenderErrorNoMissingOrExtraDevices]);
+            }
+
+            [recipient updateRegisteredRecipientWithDevicesToAdd:missingDevices
+                                                 devicesToRemove:extraDevices
+                                                     transaction:transaction];
+
+            if (extraDevices && extraDevices.count > 0) {
+                OWSLogInfo(@"Deleting sessions for extra devices: %@", extraDevices);
+                for (NSNumber *extraDeviceId in extraDevices) {
+                    [self.sessionStore deleteSessionForContact:recipient.uniqueId
+                                                      deviceId:extraDeviceId.intValue
+                                                   transaction:transaction.asAnyWrite];
+                }
+            }
+
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                completionHandler();
+            });
+        }];
+}
+
+- (void)handleMessageSentLocally:(TSOutgoingMessage *)message
+                         success:(void (^)(void))successParam
+                         failure:(RetryableFailureHandler)failure
+{
+    dispatch_block_t success = ^{
+        TSThread *_Nullable thread = message.thread;
+        if (thread && [thread isKindOfClass:[TSContactThread class]] &&
+            [thread.contactIdentifier isEqualToString:self.tsAccountManager.localNumber]) {
+            OWSAssertDebug(message.recipientIds.count == 1);
+            // Don't mark self-sent messages as read (or sent) until the sync transcript is sent.
+            [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+                for (NSString *recipientId in message.sendingRecipientIds) {
+                    [message updateWithReadRecipientId:recipientId
+                                         readTimestamp:message.timestamp
+                                           transaction:transaction];
+                }
+            }];
+        }
+
+        successParam();
+    };
+
+    [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+        TSInteraction *_Nullable latestCopy =
+            [TSInteraction anyFetchWithUniqueId:message.uniqueId transaction:transaction.asAnyRead];
+        if (![latestCopy isKindOfClass:[TSOutgoingMessage class]]) {
+            OWSLogWarn(@"Could not update expiration for deleted message.");
+            return;
+        }
+        TSOutgoingMessage *latestMessage = (TSOutgoingMessage *)latestCopy;
+        [[OWSDisappearingMessagesJob sharedJob] startAnyExpirationForMessage:latestMessage
+                                                         expirationStartedAt:[NSDate ows_millisecondTimeStamp]
+                                                                 transaction:transaction];
+
+        [ViewOnceMessages completeIfNecessaryWithMessage:latestMessage transaction:transaction.asAnyWrite];
     }];
+
+    if (!message.shouldSyncTranscript) {
+        return success();
+    }
+
+    BOOL shouldSendTranscript = (AreRecipientUpdatesEnabled() || !message.hasSyncedTranscript);
+    if (!shouldSendTranscript) {
+        return success();
+    }
+
+    BOOL isRecipientUpdate = message.hasSyncedTranscript;
+    [self
+        sendSyncTranscriptForMessage:message
+                   isRecipientUpdate:isRecipientUpdate
+                             success:^{
+                                 [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+                                     [message updateWithHasSyncedTranscript:YES transaction:transaction];
+                                 }];
+
+                                 success();
+                             }
+                             failure:failure];
 }
 
 - (void)sendSyncTranscriptForMessage:(TSOutgoingMessage *)message
+                   isRecipientUpdate:(BOOL)isRecipientUpdate
+                             success:(void (^)(void))success
+                             failure:(RetryableFailureHandler)failure
 {
     OWSOutgoingSentMessageTranscript *sentMessageTranscript =
-        [[OWSOutgoingSentMessageTranscript alloc] initWithOutgoingMessage:message];
+        [[OWSOutgoingSentMessageTranscript alloc] initWithOutgoingMessage:message isRecipientUpdate:isRecipientUpdate];
 
-    [self sendMessageToService:sentMessageTranscript
-        recipient:[SignalRecipient selfRecipient]
+    NSString *recipientId = self.tsAccountManager.localNumber;
+    __block SignalRecipient *recipient;
+    [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+        recipient = [SignalRecipient markRecipientAsRegisteredAndGet:recipientId transaction:transaction];
+    }];
+
+    OWSMessageSend *messageSend = [[OWSMessageSend alloc] initWithMessage:sentMessageTranscript
         thread:message.thread
-        attempts:OWSMessageSenderRetryAttempts
+        recipient:recipient
+        senderCertificate:nil
+        udAccess:nil
+        localNumber:self.tsAccountManager.localNumber
         success:^{
-            DDLogInfo(@"Succesfully sent sync transcript.");
+            OWSLogInfo(@"Successfully sent sync transcript.");
+
+            success();
         }
         failure:^(NSError *error) {
-            // FIXME: We don't yet honor the isRetryable flag here, since sendSyncTranscriptForMessage
-            // isn't yet wrapped in our retryable SendMessageOperation. Addressing this would require
-            // a refactor to the MessageSender. Note that we *do* however continue to respect the
-            // OWSMessageSenderRetryAttempts, which is an "inner" retry loop, encompassing only the
-            // messaging API.
-            DDLogInfo(@"Failed to send sync transcript: %@ (isRetryable: %d)", error, [error isRetryable]);
+            OWSLogInfo(@"Failed to send sync transcript: %@ (isRetryable: %d)", error, [error isRetryable]);
+
+            failure(error);
         }];
+    [self sendMessageToRecipient:messageSend];
 }
 
-- (NSArray<NSDictionary *> *)deviceMessages:(TSOutgoingMessage *)message
-                               forRecipient:(SignalRecipient *)recipient
+- (NSArray<NSDictionary *> *)throws_deviceMessagesForMessageSend:(OWSMessageSend *)messageSend
 {
-    OWSAssert(message);
-    OWSAssert(recipient);
+    OWSAssertDebug(messageSend.message);
+    OWSAssertDebug(messageSend.recipient);
+
+    SignalRecipient *recipient = messageSend.recipient;
 
     NSMutableArray *messagesArray = [NSMutableArray arrayWithCapacity:recipient.devices.count];
 
-    NSData *plainText = [message buildPlainTextData:recipient];
-    DDLogDebug(@"%@ built message: %@ plainTextData.length: %lu",
-        self.logTag,
-        [message class],
-        (unsigned long)plainText.length);
+    NSData *_Nullable plainText = [messageSend.message buildPlainTextData:messageSend.recipient];
+    if (!plainText) {
+        OWSRaiseException(InvalidMessageException, @"Failed to build message proto");
+    }
+    OWSLogDebug(
+        @"built message: %@ plainTextData.length: %lu", [messageSend.message class], (unsigned long)plainText.length);
 
-    for (NSNumber *deviceNumber in recipient.devices) {
+    OWSLogVerbose(@"building device messages for: %@ %@ (isLocalNumber: %d, isUDSend: %d)",
+        recipient.recipientId,
+        recipient.devices,
+        messageSend.isLocalNumber,
+        messageSend.isUDSend);
+
+    NSMutableArray<NSNumber *> *deviceIds = [recipient.devices mutableCopy];
+    OWSAssertDebug(deviceIds);
+
+    if (messageSend.isLocalNumber) {
+        [deviceIds removeObject:@(OWSDevicePrimaryDeviceId)];
+    }
+
+    for (NSNumber *deviceId in deviceIds) {
         @try {
-            __block NSDictionary *messageDict;
+            // This may involve blocking network requests, so we do it _before_
+            // we open a transaction.
+            [self throws_ensureRecipientHasSessionForMessageSend:messageSend deviceId:deviceId];
+
+            __block NSDictionary *_Nullable messageDict;
             __block NSException *encryptionException;
-            // Mutating session state is not thread safe, so we operate on a serial queue, shared with decryption
-            // operations.
-            dispatch_sync([OWSDispatch sessionStoreQueue], ^{
-                @try {
-                    messageDict = [self encryptedMessageWithPlaintext:plainText
-                                                          toRecipient:recipient.uniqueId
-                                                             deviceId:deviceNumber
-                                                        keyingStorage:self.storageManager
-                                                             isSilent:message.isSilent];
-                } @catch (NSException *exception) {
-                    encryptionException = exception;
-                }
-            });
+            [self.dbConnection
+                readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+                    @try {
+                        messageDict = [self throws_encryptedMessageForMessageSend:messageSend
+                                                                         deviceId:deviceId
+                                                                        plainText:plainText
+                                                                      transaction:transaction.asAnyWrite];
+                    } @catch (NSException *exception) {
+                        encryptionException = exception;
+                    }
+                }];
 
             if (encryptionException) {
-                DDLogInfo(@"%@ Exception during encryption: %@", self.logTag, encryptionException);
+                OWSLogInfo(@"Exception during encryption: %@", encryptionException);
                 @throw encryptionException;
             }
 
             if (messageDict) {
                 [messagesArray addObject:messageDict];
             } else {
-                @throw [NSException exceptionWithName:InvalidMessageException
-                                               reason:@"Failed to encrypt message"
-                                             userInfo:nil];
+                OWSRaiseException(InvalidMessageException, @"Failed to encrypt message");
             }
         } @catch (NSException *exception) {
             if ([exception.name isEqualToString:OWSMessageSenderInvalidDeviceException]) {
-                [recipient removeDevices:[NSSet setWithObject:deviceNumber]];
+                [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+                    [recipient updateRegisteredRecipientWithDevicesToAdd:nil
+                                                         devicesToRemove:@[ deviceId ]
+                                                             transaction:transaction];
+                }];
             } else {
                 @throw exception;
             }
@@ -1278,98 +1574,214 @@ NSString *const OWSMessageSenderRateLimitedException = @"RateLimitedException";
     return [messagesArray copy];
 }
 
-- (NSDictionary *)encryptedMessageWithPlaintext:(NSData *)plainText
-                                    toRecipient:(NSString *)identifier
-                                       deviceId:(NSNumber *)deviceNumber
-                                  keyingStorage:(TSStorageManager *)storage
-                                       isSilent:(BOOL)isSilent
+- (void)throws_ensureRecipientHasSessionForMessageSend:(OWSMessageSend *)messageSend deviceId:(NSNumber *)deviceId
 {
-    OWSAssert(plainText);
-    OWSAssert(identifier.length > 0);
-    OWSAssert(deviceNumber);
-    OWSAssert(storage);
+    OWSAssertDebug(messageSend);
+    OWSAssertDebug(deviceId);
 
-    if (![storage containsSession:identifier deviceId:[deviceNumber intValue]]) {
-        __block dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-        __block PreKeyBundle *_Nullable bundle;
-        __block NSException *_Nullable exception;
-        [self.networkManager makeRequest:[[TSRecipientPrekeyRequest alloc] initWithRecipient:identifier
-                                                                                    deviceId:[deviceNumber stringValue]]
-            success:^(NSURLSessionDataTask *task, id responseObject) {
-                bundle = [PreKeyBundle preKeyBundleFromDictionary:responseObject forDeviceNumber:deviceNumber];
-                dispatch_semaphore_signal(sema);
-            }
-            failure:^(NSURLSessionDataTask *task, NSError *error) {
-                if (!IsNSErrorNetworkFailure(error)) {
-                    OWSProdError([OWSAnalyticsEvents messageSenderErrorRecipientPrekeyRequestFailed]);
-                }
-                DDLogError(@"Server replied to PreKeyBundle request with error: %@", error);
-                NSHTTPURLResponse *response = (NSHTTPURLResponse *)task.response;
-                if (response.statusCode == 404) {
-                    // Can't throw exception from within callback as it's probabably a different thread.
-                    exception = [NSException exceptionWithName:OWSMessageSenderInvalidDeviceException
-                                                        reason:@"Device not registered"
-                                                      userInfo:nil];
-                } else if (response.statusCode == 413) {
-                    // Can't throw exception from within callback as it's probabably a different thread.
-                    exception = [NSException exceptionWithName:OWSMessageSenderRateLimitedException
-                                                        reason:@"Too many prekey requests"
-                                                      userInfo:nil];
-                }
-                dispatch_semaphore_signal(sema);
-            }];
-        dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
-        if (exception) {
-            @throw exception;
-        }
+    SignalRecipient *recipient = messageSend.recipient;
+    NSString *recipientId = recipient.recipientId;
+    OWSAssertDebug(recipientId.length > 0);
 
-        if (!bundle) {
-            @throw [NSException exceptionWithName:InvalidVersionException
-                                           reason:@"Can't get a prekey bundle from the server with required information"
-                                         userInfo:nil];
-        } else {
-            SessionBuilder *builder = [[SessionBuilder alloc] initWithSessionStore:storage
-                                                                       preKeyStore:storage
-                                                                 signedPreKeyStore:storage
-                                                                  identityKeyStore:[OWSIdentityManager sharedManager]
-                                                                       recipientId:identifier
-                                                                          deviceId:[deviceNumber intValue]];
-            @try {
-                // Mutating session state is not thread safe.
-                @synchronized(self) {
-                    [builder processPrekeyBundle:bundle];
-                }
-            } @catch (NSException *exception) {
-                if ([exception.name isEqualToString:UntrustedIdentityKeyException]) {
-                    @throw [NSException
-                        exceptionWithName:UntrustedIdentityKeyException
-                                   reason:nil
-                                 userInfo:@{ TSInvalidPreKeyBundleKey : bundle, TSInvalidRecipientKey : identifier }];
-                }
-                @throw exception;
-            }
-        }
+    __block BOOL hasSession;
+    [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+        hasSession = [self.sessionStore containsSession:recipientId
+                                               deviceId:[deviceId intValue]
+                                            transaction:transaction.asAnyWrite];
+    }];
+    if (hasSession) {
+        return;
+    }
+    // Discard "typing indicator" messages if there is no existing session with the user.
+    BOOL canSafelyBeDiscarded = messageSend.message.isOnline;
+    if (canSafelyBeDiscarded) {
+        OWSRaiseException(NoSessionForTransientMessageException, @"No session for transient message.");
     }
 
-    SessionCipher *cipher = [[SessionCipher alloc] initWithSessionStore:storage
-                                                            preKeyStore:storage
-                                                      signedPreKeyStore:storage
-                                                       identityKeyStore:[OWSIdentityManager sharedManager]
-                                                            recipientId:identifier
-                                                               deviceId:[deviceNumber intValue]];
+    __block dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+    __block PreKeyBundle *_Nullable bundle;
+    __block NSException *_Nullable exception;
+    [self makePrekeyRequestForMessageSend:messageSend
+        deviceId:deviceId
+        success:^(PreKeyBundle *_Nullable responseBundle) {
+            bundle = responseBundle;
+            dispatch_semaphore_signal(sema);
+        }
+        failure:^(NSUInteger statusCode) {
+            if (statusCode == 404) {
+                // Can't throw exception from within callback as it's probabably a different thread.
+                exception = [NSException exceptionWithName:OWSMessageSenderInvalidDeviceException
+                                                    reason:@"Device not registered"
+                                                  userInfo:nil];
+            } else if (statusCode == 413) {
+                // Can't throw exception from within callback as it's probabably a different thread.
+                exception = [NSException exceptionWithName:OWSMessageSenderRateLimitedException
+                                                    reason:@"Too many prekey requests"
+                                                  userInfo:nil];
+            }
+            dispatch_semaphore_signal(sema);
+        }];
+    dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
+    if (exception) {
+        @throw exception;
+    }
 
-    id<CipherMessage> encryptedMessage = [cipher encryptMessage:[plainText paddedMessageBody]];
+    if (!bundle) {
+        NSString *missingPrekeyBundleException = @"missingPrekeyBundleException";
+        OWSRaiseException(
+            missingPrekeyBundleException, @"Can't get a prekey bundle from the server with required information");
+    } else {
+        SessionBuilder *builder = [[SessionBuilder alloc] initWithSessionStore:self.sessionStore
+                                                                   preKeyStore:self.preKeyStore
+                                                             signedPreKeyStore:self.signedPreKeyStore
+                                                              identityKeyStore:self.identityManager
+                                                                   recipientId:recipientId
+                                                                      deviceId:[deviceId intValue]];
+        [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+            @try {
+                [builder throws_processPrekeyBundle:bundle protocolContext:transaction.asAnyWrite];
+            } @catch (NSException *caughtException) {
+                exception = caughtException;
+            }
+        }];
+        if (exception) {
+            if ([exception.name isEqualToString:UntrustedIdentityKeyException]) {
+                OWSRaiseExceptionWithUserInfo(UntrustedIdentityKeyException,
+                    (@{ TSInvalidPreKeyBundleKey : bundle, TSInvalidRecipientKey : recipientId }),
+                    @"");
+            }
+            @throw exception;
+        }
+    }
+}
 
+- (void)makePrekeyRequestForMessageSend:(OWSMessageSend *)messageSend
+                               deviceId:(NSNumber *)deviceId
+                                success:(void (^)(PreKeyBundle *_Nullable))success
+                                failure:(void (^)(NSUInteger))failure {
+    OWSAssertDebug(messageSend);
+    OWSAssertDebug(deviceId);
 
-    NSData *serializedMessage = encryptedMessage.serialized;
-    TSWhisperMessageType messageType = [self messageTypeForCipherMessage:encryptedMessage];
+    SignalRecipient *recipient = messageSend.recipient;
+    NSString *recipientId = recipient.recipientId;
+    OWSAssertDebug(recipientId.length > 0);
 
-    OWSMessageServiceParams *messageParams = [[OWSMessageServiceParams alloc] initWithType:messageType
-                                                                               recipientId:identifier
-                                                                                    device:[deviceNumber intValue]
-                                                                                   content:serializedMessage
-                                                                                  isSilent:isSilent
-                                                                            registrationId:cipher.remoteRegistrationId];
+    OWSRequestMaker *requestMaker = [[OWSRequestMaker alloc] initWithLabel:@"Prekey Fetch"
+        requestFactoryBlock:^(SMKUDAccessKey *_Nullable udAccessKey) {
+            return [OWSRequestFactory recipientPrekeyRequestWithRecipient:recipientId
+                                                                 deviceId:[deviceId stringValue]
+                                                              udAccessKey:udAccessKey];
+        }
+        udAuthFailureBlock:^{
+            // Note the UD auth failure so subsequent retries
+            // to this recipient also use basic auth.
+            [messageSend setHasUDAuthFailed];
+        }
+        websocketFailureBlock:^{
+            // Note the websocket failure so subsequent retries
+            // to this recipient also use REST.
+            messageSend.hasWebsocketSendFailed = YES;
+        }
+        recipientId:recipientId
+        udAccess:messageSend.udAccess
+        canFailoverUDAuth:YES];
+    [[requestMaker makeRequestObjc]
+            .then(^(OWSRequestMakerResult *result) {
+                // We _do not_ want to dispatch to the sendingQueue here; we're
+                // using a semaphore on the sendingQueue to block on this request.
+                const id responseObject = result.responseObject;
+                PreKeyBundle *_Nullable bundle =
+                    [PreKeyBundle preKeyBundleFromDictionary:responseObject forDeviceNumber:deviceId];
+                success(bundle);
+            })
+            .catch(^(NSError *error) {
+                // We _do not_ want to dispatch to the sendingQueue here; we're
+                // using a semaphore on the sendingQueue to block on this request.
+                NSUInteger statusCode = 0;
+                if ([error.domain isEqualToString:TSNetworkManagerErrorDomain]) {
+                    statusCode = error.code;
+                } else {
+                    OWSFailDebug(@"Unexpected error: %@", error);
+                }
+
+                failure(statusCode);
+            }) retainUntilComplete];
+}
+
+- (nullable NSDictionary *)throws_encryptedMessageForMessageSend:(OWSMessageSend *)messageSend
+                                                        deviceId:(NSNumber *)deviceId
+                                                       plainText:(NSData *)plainText
+                                                     transaction:(SDSAnyWriteTransaction *)transaction
+{
+    OWSAssertDebug(messageSend);
+    OWSAssertDebug(deviceId);
+    OWSAssertDebug(plainText);
+    OWSAssertDebug(transaction);
+
+    TSOutgoingMessage *message = messageSend.message;
+    SignalRecipient *recipient = messageSend.recipient;
+    NSString *recipientId = recipient.recipientId;
+    OWSAssertDebug(recipientId.length > 0);
+
+    if (![self.sessionStore containsSession:recipientId deviceId:[deviceId intValue] transaction:transaction]) {
+        NSString *missingSessionException = @"missingSessionException";
+        OWSRaiseException(missingSessionException,
+            @"Unexpectedly missing session for recipient: %@, device: %@",
+            recipientId,
+            deviceId);
+    }
+
+    SessionCipher *cipher = [[SessionCipher alloc] initWithSessionStore:self.sessionStore
+                                                            preKeyStore:self.preKeyStore
+                                                      signedPreKeyStore:self.signedPreKeyStore
+                                                       identityKeyStore:self.identityManager
+                                                            recipientId:recipientId
+                                                               deviceId:[deviceId intValue]];
+
+    NSData *_Nullable serializedMessage;
+    TSWhisperMessageType messageType;
+    if (messageSend.isUDSend) {
+        NSError *error;
+        SMKSecretSessionCipher *_Nullable secretCipher =
+            [[SMKSecretSessionCipher alloc] initWithSessionStore:self.sessionStore
+                                                     preKeyStore:self.preKeyStore
+                                               signedPreKeyStore:self.signedPreKeyStore
+                                                   identityStore:self.identityManager
+                                                           error:&error];
+        if (error || !secretCipher) {
+            OWSRaiseException(@"SecretSessionCipherFailure", @"Can't create secret session cipher.");
+        }
+
+        serializedMessage = [secretCipher throwswrapped_encryptMessageWithRecipientId:recipientId
+                                                                             deviceId:deviceId.intValue
+                                                                      paddedPlaintext:[plainText paddedMessageBody]
+                                                                    senderCertificate:messageSend.senderCertificate
+                                                                      protocolContext:transaction
+                                                                                error:&error];
+        SCKRaiseIfExceptionWrapperError(error);
+        if (!serializedMessage || error) {
+            OWSFailDebug(@"error while UD encrypting message: %@", error);
+            return nil;
+        }
+        messageType = TSUnidentifiedSenderMessageType;
+    } else {
+        // This may throw an exception.
+        id<CipherMessage> encryptedMessage =
+            [cipher throws_encryptMessage:[plainText paddedMessageBody] protocolContext:transaction];
+        serializedMessage = encryptedMessage.serialized;
+        messageType = [self messageTypeForCipherMessage:encryptedMessage];
+    }
+
+    BOOL isSilent = message.isSilent;
+    BOOL isOnline = message.isOnline;
+    OWSMessageServiceParams *messageParams =
+        [[OWSMessageServiceParams alloc] initWithType:messageType
+                                          recipientId:recipientId
+                                               device:[deviceId intValue]
+                                              content:serializedMessage
+                                             isSilent:isSilent
+                                             isOnline:isOnline
+                                       registrationId:[cipher throws_remoteRegistrationId:transaction]];
 
     NSError *error;
     NSDictionary *jsonDict = [MTLJSONAdapter JSONDictionaryFromModel:messageParams error:&error];
@@ -1384,25 +1796,32 @@ NSString *const OWSMessageSenderRateLimitedException = @"RateLimitedException";
 
 - (TSWhisperMessageType)messageTypeForCipherMessage:(id<CipherMessage>)cipherMessage
 {
-    if ([cipherMessage isKindOfClass:[PreKeyWhisperMessage class]]) {
-        return TSPreKeyWhisperMessageType;
-    } else if ([cipherMessage isKindOfClass:[WhisperMessage class]]) {
-        return TSEncryptedWhisperMessageType;
+    switch (cipherMessage.cipherMessageType) {
+        case CipherMessageType_Whisper:
+            return TSEncryptedWhisperMessageType;
+        case CipherMessageType_Prekey:
+            return TSPreKeyWhisperMessageType;
+        default:
+            return TSUnknownMessageType;
     }
-    return TSUnknownMessageType;
 }
 
-- (void)saveGroupMessage:(TSOutgoingMessage *)message inThread:(TSThread *)thread
+- (void)saveInfoMessageForGroupMessage:(TSOutgoingMessage *)message inThread:(TSThread *)thread
 {
-    if (message.groupMetaMessage == TSGroupMessageDeliver) {
+    OWSAssertDebug(message);
+    OWSAssertDebug(thread);
+
+    if (message.groupMetaMessage == TSGroupMetaMessageDeliver) {
         // TODO: Why is this necessary?
         [message save];
-    } else if (message.groupMetaMessage == TSGroupMessageQuit) {
+    } else if (message.groupMetaMessage == TSGroupMetaMessageQuit) {
+        // MJK TODO - remove senderTimestamp
         [[[TSInfoMessage alloc] initWithTimestamp:message.timestamp
                                          inThread:thread
                                       messageType:TSInfoMessageTypeGroupQuit
                                     customMessage:message.customMessage] save];
     } else {
+        // MJK TODO - remove senderTimestamp
         [[[TSInfoMessage alloc] initWithTimestamp:message.timestamp
                                          inThread:thread
                                       messageType:TSInfoMessageTypeGroupUpdate
@@ -1411,25 +1830,168 @@ NSString *const OWSMessageSenderRateLimitedException = @"RateLimitedException";
 }
 
 // Called when the server indicates that the devices no longer exist - e.g. when the remote recipient has reinstalled.
-- (void)handleStaleDevicesWithResponse:(NSData *)responseData
-                           recipientId:(NSString *)identifier
-                            completion:(void (^)(void))completionHandler
+- (void)handleStaleDevicesWithResponseJson:(NSDictionary *)responseJson
+                               recipientId:(NSString *)identifier
+                                completion:(void (^)(void))completionHandler
 {
     dispatch_async([OWSDispatch sendingQueue], ^{
-        NSDictionary *serialization = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:nil];
-        NSArray *devices = serialization[@"staleDevices"];
+        NSArray *devices = responseJson[@"staleDevices"];
 
         if (!([devices count] > 0)) {
             return;
         }
 
-        dispatch_async([OWSDispatch sessionStoreQueue], ^{
+        [self.dbConnection asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
             for (NSUInteger i = 0; i < [devices count]; i++) {
                 int deviceNumber = [devices[i] intValue];
-                [[TSStorageManager sharedManager] deleteSessionForContact:identifier deviceId:deviceNumber];
+                [self.sessionStore deleteSessionForContact:identifier
+                                                  deviceId:deviceNumber
+                                               transaction:transaction.asAnyWrite];
             }
-            completionHandler();
-        });
+        }];
+        completionHandler();
+    });
+}
+
+@end
+
+@implementation OutgoingMessagePreparer
+
+#pragma mark - Dependencies
+
++ (YapDatabaseConnection *)dbConnection
+{
+    return SSKEnvironment.shared.primaryStorage.dbReadWriteConnection;
+}
+
+#pragma mark -
+
++ (NSArray<NSString *> *)prepareMessageForSending:(TSOutgoingMessage *)message
+                                      transaction:(YapDatabaseReadWriteTransaction *)transaction
+{
+    OWSAssertDebug(message);
+    OWSAssertDebug(transaction);
+
+    NSMutableArray<NSString *> *attachmentIds = [NSMutableArray new];
+
+    if (message.attachmentIds) {
+        [attachmentIds addObjectsFromArray:message.attachmentIds];
+    }
+
+    if (message.quotedMessage) {
+        // Though we currently only ever expect at most one thumbnail, the proto data model
+        // suggests this could change. The logic is intended to work with multiple, but
+        // if we ever actually want to send multiple, we should do more testing.
+        NSArray<TSAttachmentStream *> *quotedThumbnailAttachments =
+            [message.quotedMessage createThumbnailAttachmentsIfNecessaryWithTransaction:transaction.asAnyWrite];
+        for (TSAttachmentStream *attachment in quotedThumbnailAttachments) {
+            [attachmentIds addObject:attachment.uniqueId];
+        }
+    }
+
+    if (message.contactShare.avatarAttachmentId != nil) {
+        TSAttachment *attachment = [message.contactShare avatarAttachmentWithTransaction:transaction.asAnyWrite];
+        if ([attachment isKindOfClass:[TSAttachmentStream class]]) {
+            [attachmentIds addObject:attachment.uniqueId];
+        } else {
+            OWSFailDebug(@"unexpected avatarAttachment: %@", attachment);
+        }
+    }
+
+    if (message.linkPreview.imageAttachmentId != nil) {
+        TSAttachment *attachment =
+            [TSAttachment anyFetchWithUniqueId:message.linkPreview.imageAttachmentId transaction:transaction.asAnyRead];
+        if ([attachment isKindOfClass:[TSAttachmentStream class]]) {
+            [attachmentIds addObject:attachment.uniqueId];
+        } else {
+            OWSFailDebug(@"unexpected attachment: %@", attachment);
+        }
+    }
+
+    if (message.messageSticker.attachmentId != nil) {
+        TSAttachment *attachment =
+            [TSAttachment anyFetchWithUniqueId:message.messageSticker.attachmentId transaction:transaction.asAnyRead];
+        if ([attachment isKindOfClass:[TSAttachmentStream class]]) {
+            [attachmentIds addObject:attachment.uniqueId];
+        } else {
+            OWSFailDebug(@"unexpected attachment: %@", attachment);
+        }
+    }
+
+    // All outgoing messages should be saved at the time they are enqueued.
+    [message saveWithTransaction:transaction];
+    // When we start a message send, all "failed" recipients should be marked as "sending".
+    [message updateAllUnsentRecipientsAsSendingWithTransaction:transaction.asAnyWrite];
+
+    if (message.messageSticker != nil) {
+        // Update "Recent Stickers" list to reflect sends.
+        [StickerManager stickerWasSent:message.messageSticker.info transaction:transaction.asAnyWrite];
+    }
+    
+    return attachmentIds;
+}
+
++ (void)prepareAttachments:(NSArray<OWSOutgoingAttachmentInfo *> *)attachmentInfos
+                 inMessage:(TSOutgoingMessage *)outgoingMessage
+         completionHandler:(void (^)(NSError *_Nullable error))completionHandler
+{
+    OWSAssertDebug(attachmentInfos.count > 0);
+    OWSAssertDebug(outgoingMessage);
+
+    dispatch_async([OWSDispatch attachmentsQueue], ^{
+        // Eventually we'll pad all outgoing attachments, but currently just stickers.
+        // Currently this method is only used to process "body" attachments, which
+        // cannot be sent along with stickers.
+        OWSAssertDebug(outgoingMessage.messageSticker == nil);
+
+        NSMutableArray<TSAttachmentStream *> *attachmentStreams = [NSMutableArray new];
+        for (OWSOutgoingAttachmentInfo *attachmentInfo in attachmentInfos) {
+            TSAttachmentStream *attachmentStream =
+                [[TSAttachmentStream alloc] initWithContentType:attachmentInfo.contentType
+                                                      byteCount:(UInt32)attachmentInfo.dataSource.dataLength
+                                                 sourceFilename:attachmentInfo.sourceFilename
+                                                        caption:attachmentInfo.caption
+                                                 albumMessageId:attachmentInfo.albumMessageId
+                                              shouldAlwaysPad:NO];
+            if (outgoingMessage.isVoiceMessage) {
+                attachmentStream.attachmentType = TSAttachmentTypeVoiceMessage;
+            }
+
+            if (![attachmentStream writeDataSource:attachmentInfo.dataSource]) {
+                OWSProdError([OWSAnalyticsEvents messageSenderErrorCouldNotWriteAttachment]);
+                NSError *error = OWSErrorMakeWriteAttachmentDataError();
+                completionHandler(error);
+                return;
+            }
+
+            [attachmentStreams addObject:attachmentStream];
+        }
+
+        [OWSMessageSender.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+            [outgoingMessage
+                anyUpdateWithTransaction:transaction
+                                   block:^(TSInteraction *interaction) {
+                                       if (![interaction isKindOfClass:[TSOutgoingMessage class]]) {
+                                           OWSFailDebug(@"Object has unexpected type: %@", [interaction class]);
+                                           return;
+                                       }
+                                       TSOutgoingMessage *outgoingMessage = (TSOutgoingMessage *)interaction;
+                                       for (TSAttachmentStream *attachmentStream in attachmentStreams) {
+                                           [outgoingMessage.attachmentIds addObject:attachmentStream.uniqueId];
+
+                                           if (attachmentStream.sourceFilename) {
+                                               outgoingMessage.attachmentFilenameMap[attachmentStream.uniqueId]
+                                                   = attachmentStream.sourceFilename;
+                                           }
+                                       }
+                                   }];
+
+            for (TSAttachmentStream *attachmentStream in attachmentStreams) {
+                [attachmentStream anyInsertWithTransaction:transaction];
+            }
+        }];
+
+        completionHandler(nil);
     });
 }
 

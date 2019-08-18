@@ -1,11 +1,11 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSDisappearingMessagesConfigurationMessage.h"
-#import "NSDate+OWS.h"
 #import "OWSDisappearingMessagesConfiguration.h"
-#import "OWSSignalServiceProtos.pb.h"
+#import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -14,6 +14,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) OWSDisappearingMessagesConfiguration *configuration;
 
 @end
+
+#pragma mark -
 
 @implementation OWSDisappearingMessagesConfigurationMessage
 
@@ -24,7 +26,20 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithConfiguration:(OWSDisappearingMessagesConfiguration *)configuration thread:(TSThread *)thread
 {
-    self = [super initWithTimestamp:[NSDate ows_millisecondTimeStamp] inThread:thread];
+    // MJK TODO - remove sender timestamp
+    self = [super initOutgoingMessageWithTimestamp:[NSDate ows_millisecondTimeStamp]
+                                          inThread:thread
+                                       messageBody:nil
+                                     attachmentIds:[NSMutableArray new]
+                                  expiresInSeconds:0
+                                   expireStartedAt:0
+                                    isVoiceMessage:NO
+                                  groupMetaMessage:TSGroupMetaMessageUnspecified
+                                     quotedMessage:nil
+                                      contactShare:nil
+                                       linkPreview:nil
+                                    messageSticker:nil
+                                 isViewOnceMessage:NO];
     if (!self) {
         return self;
     }
@@ -35,10 +50,14 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 
-- (OWSSignalServiceProtosDataMessageBuilder *)dataMessageBuilder
+- (nullable SSKProtoDataMessageBuilder *)dataMessageBuilder
 {
-    OWSSignalServiceProtosDataMessageBuilder *dataMessageBuilder = [super dataMessageBuilder];
-    [dataMessageBuilder setFlags:OWSSignalServiceProtosDataMessageFlagsExpirationTimerUpdate];
+    SSKProtoDataMessageBuilder *_Nullable dataMessageBuilder = [super dataMessageBuilder];
+    if (!dataMessageBuilder) {
+        return nil;
+    }
+    [dataMessageBuilder setTimestamp:self.timestamp];
+    [dataMessageBuilder setFlags:SSKProtoDataMessageFlagsExpirationTimerUpdate];
     if (self.configuration.isEnabled) {
         [dataMessageBuilder setExpireTimer:self.configuration.durationSeconds];
     } else {

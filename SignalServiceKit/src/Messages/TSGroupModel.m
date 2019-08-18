@@ -1,22 +1,79 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "TSGroupModel.h"
 #import "FunctionalUtil.h"
+#import "NSString+SSK.h"
+
+NS_ASSUME_NONNULL_BEGIN
+
+const int32_t kGroupIdLength = 16;
+
+@interface TSGroupModel ()
+
+@property (nullable, nonatomic) NSString *groupName;
+
+@end
+
+#pragma mark -
 
 @implementation TSGroupModel
 
 #if TARGET_OS_IOS
-- (instancetype)initWithTitle:(NSString *)title
+- (instancetype)initWithTitle:(nullable NSString *)title
                     memberIds:(NSArray<NSString *> *)memberIds
-                        image:(UIImage *)image
+                        image:(nullable UIImage *)image
                       groupId:(NSData *)groupId
 {
+    OWSAssertDebug(memberIds);
+    OWSAssertDebug(groupId.length == kGroupIdLength);
+
+    self = [super init];
+    if (!self) {
+        return self;
+    }
+
     _groupName              = title;
     _groupMemberIds         = [memberIds copy];
     _groupImage = image; // image is stored in DB
     _groupId                = groupId;
+
+    return self;
+}
+
+- (instancetype)initWithGroupId:(NSData *)groupId
+                 groupMemberIds:(NSArray<NSString *> *)groupMemberIds
+                      groupName:(nullable NSString *)groupName
+{
+    OWSAssertDebug(groupMemberIds);
+    OWSAssertDebug(groupId.length == kGroupIdLength);
+
+    self = [super init];
+    if (!self) {
+        return self;
+    }
+
+    _groupId = groupId;
+    _groupMemberIds = [groupMemberIds copy];
+    _groupName = groupName;
+
+    return self;
+}
+
+- (nullable instancetype)initWithCoder:(NSCoder *)coder
+{
+    self = [super initWithCoder:coder];
+    if (!self) {
+        return self;
+    }
+
+    // Occasionally seeing this as nil in legacy data,
+    // which causes crashes.
+    if (_groupMemberIds == nil) {
+        _groupMemberIds = [NSArray new];
+    }
+    OWSAssertDebug(self.groupId.length == kGroupIdLength);
 
     return self;
 }
@@ -102,7 +159,13 @@
     return updatedGroupInfoString;
 }
 
-
 #endif
 
+- (nullable NSString *)groupName
+{
+    return _groupName.filterStringForDisplay;
+}
+
 @end
+
+NS_ASSUME_NONNULL_END

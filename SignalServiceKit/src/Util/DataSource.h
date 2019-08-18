@@ -1,10 +1,10 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
-// A protocol that abstracts away a source of NSData
+// A base class that abstracts away a source of NSData
 // and allows us to:
 //
 // * Lazy-load if possible.
@@ -29,11 +29,9 @@ NS_ASSUME_NONNULL_BEGIN
 // Returns YES on success.
 - (BOOL)writeToPath:(NSString *)dstFilePath;
 
-// If called, this data source will try to delete its on-disk contents
-// when it is deallocated.
-- (void)setShouldDeleteOnDeallocation;
-
 - (BOOL)isValidImage;
+
+- (BOOL)isValidVideo;
 
 @end
 
@@ -47,7 +45,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (nullable DataSource *)dataSourceWithOversizeText:(NSString *_Nullable)text;
 
-+ (DataSource *)dataSourceWithSyncMessage:(NSData *)data;
++ (DataSource *)dataSourceWithSyncMessageData:(NSData *)data;
 
 + (DataSource *)emptyDataSource;
 
@@ -57,9 +55,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface DataSourcePath : DataSource
 
-+ (nullable DataSource *)dataSourceWithURL:(NSURL *)fileUrl;
++ (nullable DataSource *)dataSourceWithURL:(NSURL *)fileUrl shouldDeleteOnDeallocation:(BOOL)shouldDeleteOnDeallocation;
 
-+ (nullable DataSource *)dataSourceWithFilePath:(NSString *)filePath;
++ (nullable DataSource *)dataSourceWithFilePath:(NSString *)filePath
+                     shouldDeleteOnDeallocation:(BOOL)shouldDeleteOnDeallocation;
 
 @end
 

@@ -1,9 +1,10 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "TSYapDatabaseObject.h"
-#import "TSStorageManager.h"
+#import "OWSPrimaryStorage.h"
+#import "SSKEnvironment.h"
 #import <YapDatabase/YapDatabaseTransaction.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -91,9 +92,9 @@ NS_ASSUME_NONNULL_BEGIN
     return [[self class] dbReadWriteConnection];
 }
 
-- (TSStorageManager *)storageManager
+- (OWSPrimaryStorage *)primaryStorage
 {
-    return [[self class] storageManager];
+    return [[self class] primaryStorage];
 }
 
 #pragma mark Class Methods
@@ -109,29 +110,26 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (YapDatabaseConnection *)dbReadConnection
 {
-    // We use TSYapDatabaseObject's dbReadWriteConnection (not TSStorageManager's
+    OWSJanksUI();
+
+    // We use TSYapDatabaseObject's dbReadWriteConnection (not OWSPrimaryStorage's
     // dbReadConnection) for consistency, since we tend to [TSYapDatabaseObject
     // save] and want to write to the same connection we read from.  To get true
     // consistency, we'd want to update entities by reading & writing from within
     // the same transaction, but that'll be a big refactor.
-
     return self.dbReadWriteConnection;
 }
 
 + (YapDatabaseConnection *)dbReadWriteConnection
 {
-    // Use a dedicated connection for model reads & writes.
-    static YapDatabaseConnection *dbReadWriteConnection = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        dbReadWriteConnection = [self storageManager].newDatabaseConnection;
-    });
-    return dbReadWriteConnection;
+    OWSJanksUI();
+
+    return SSKEnvironment.shared.objectReadWriteConnection;
 }
 
-+ (TSStorageManager *)storageManager
++ (OWSPrimaryStorage *)primaryStorage
 {
-    return [TSStorageManager sharedManager];
+    return [OWSPrimaryStorage sharedManager];
 }
 
 + (NSString *)collection
@@ -203,21 +201,175 @@ NS_ASSUME_NONNULL_BEGIN
     return object;
 }
 
-#pragma mark Update With...
+#pragma mark - Update With...
 
 - (void)applyChangeToSelfAndLatestCopy:(YapDatabaseReadWriteTransaction *)transaction
                            changeBlock:(void (^)(id))changeBlock
 {
-    OWSAssert(transaction);
+    OWSAssertDebug(transaction);
 
     changeBlock(self);
 
     NSString *collection = [[self class] collection];
     id latestInstance = [transaction objectForKey:self.uniqueId inCollection:collection];
     if (latestInstance) {
-        changeBlock(latestInstance);
+        // Don't apply changeBlock twice to the same instance.
+        // It's at least unnecessary and actually wrong for some blocks.
+        // e.g. `changeBlock: { $0 in $0.someField++ }`
+        if (latestInstance != self) {
+            changeBlock(latestInstance);
+        }
         [latestInstance saveWithTransaction:transaction];
     }
+}
+
+#pragma mark Reload
+
+- (void)reload
+{
+    [self.dbReadConnection readWithBlock:^(YapDatabaseReadTransaction *_Nonnull transaction) {
+        [self reloadWithTransaction:transaction];
+    }];
+}
+
+- (void)reloadWithTransaction:(YapDatabaseReadTransaction *)transaction
+{
+    [self reloadWithTransaction:transaction ignoreMissing:NO];
+}
+
+- (void)reloadWithTransaction:(YapDatabaseReadTransaction *)transaction ignoreMissing:(BOOL)ignoreMissing
+{
+    TSYapDatabaseObject *latest = [[self class] fetchObjectWithUniqueID:self.uniqueId transaction:transaction];
+    if (!latest) {
+        if (!ignoreMissing) {
+            OWSFailDebug(@"`latest` was unexpectedly nil");
+        }
+        return;
+    }
+
+    [self setValuesForKeysWithDictionary:latest.dictionaryValue];
+}
+
+#pragma mark - Write Hooks
+
+- (void)anyWillInsertWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    // Do nothing.
+}
+
+- (void)anyDidInsertWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    // Do nothing.
+}
+
+- (void)anyWillRemoveWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    // Do nothing.
+}
+
+- (void)anyDidRemoveWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    // Do nothing.
+}
+
+#pragma mark - YDB Deprecation
+
++ (NSUInteger)ydb_numberOfKeysInCollection
+{
+    return [self numberOfKeysInCollection];
+}
+
++ (NSUInteger)ydb_numberOfKeysInCollectionWithTransaction:(YapDatabaseReadTransaction *)transaction
+{
+    return [self numberOfKeysInCollectionWithTransaction:transaction];
+}
+
++ (void)ydb_removeAllObjectsInCollection
+{
+    [self removeAllObjectsInCollection];
+}
+
++ (NSArray *)ydb_allObjectsInCollection
+{
+    return [self allObjectsInCollection];
+}
+
++ (void)ydb_enumerateCollectionObjectsUsingBlock:(void (^)(id obj, BOOL *stop))block
+{
+    return [self enumerateCollectionObjectsUsingBlock:block];
+}
+
++ (void)ydb_enumerateCollectionObjectsWithTransaction:(YapDatabaseReadTransaction *)transaction
+                                           usingBlock:(void (^)(id object, BOOL *stop))block
+{
+    return [self enumerateCollectionObjectsWithTransaction:transaction usingBlock:block];
+}
+
++ (nullable instancetype)ydb_fetchObjectWithUniqueID:(NSString *)uniqueID
+                                         transaction:(YapDatabaseReadTransaction *)transaction
+{
+    return [self fetchObjectWithUniqueID:uniqueID transaction:transaction];
+}
+
++ (nullable instancetype)ydb_fetchObjectWithUniqueID:(NSString *)uniqueID
+{
+    return [self fetchObjectWithUniqueID:uniqueID];
+}
+
+- (void)ydb_save
+{
+    [self save];
+}
+
+- (void)ydb_reload
+{
+    [self reload];
+}
+
+- (void)ydb_reloadWithTransaction:(YapDatabaseReadTransaction *)transaction
+{
+    [self reloadWithTransaction:transaction];
+}
+
+- (void)ydb_reloadWithTransaction:(YapDatabaseReadTransaction *)transaction ignoreMissing:(BOOL)ignoreMissing
+{
+    [self reloadWithTransaction:transaction ignoreMissing:ignoreMissing];
+}
+
+- (void)ydb_saveAsyncWithCompletionBlock:(void (^_Nullable)(void))completionBlock
+{
+    [self saveAsyncWithCompletionBlock:completionBlock];
+}
+
+- (void)ydb_saveWithTransaction:(YapDatabaseReadWriteTransaction *)transaction
+{
+    [self saveWithTransaction:transaction];
+}
+
+- (void)ydb_touch
+{
+    [self touch];
+}
+
+- (void)ydb_touchWithTransaction:(YapDatabaseReadWriteTransaction *)transaction
+{
+    [self touchWithTransaction:transaction];
+}
+
+- (void)ydb_removeWithTransaction:(YapDatabaseReadWriteTransaction *)transaction
+{
+    [self removeWithTransaction:transaction];
+}
+
+- (void)ydb_remove
+{
+    [self remove];
+}
+
+- (void)ydb_applyChangeToSelfAndLatestCopy:(YapDatabaseReadWriteTransaction *)transaction
+                               changeBlock:(void (^)(id))changeBlock
+{
+    [self applyChangeToSelfAndLatestCopy:transaction changeBlock:changeBlock];
 }
 
 @end

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWS100RemoveTSRecipientsMigration.h"
@@ -19,8 +19,10 @@ static NSString *const OWS100RemoveTSRecipientsMigrationId = @"100";
 
 - (void)runUpWithTransaction:(YapDatabaseReadWriteTransaction *)transaction
 {
+    OWSAssertDebug(transaction);
+
     NSUInteger legacyRecipientCount = [transaction numberOfKeysInCollection:@"TSRecipient"];
-    DDLogWarn(@"Removing %lu objects from TSRecipient collection", (unsigned long)legacyRecipientCount);
+    OWSLogWarn(@"Removing %lu objects from TSRecipient collection", (unsigned long)legacyRecipientCount);
     [transaction removeAllObjectsInCollection:@"TSRecipient"];
 }
 

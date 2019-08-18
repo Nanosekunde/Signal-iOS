@@ -1,27 +1,29 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
+#import "MIMETypeUtil.h"
 #import "OWSDevice.h"
+#import "OWSPrimaryStorage.h"
+#import "SSKBaseTestObjC.h"
 #import "TSAttachmentStream.h"
 #import "TSContactThread.h"
 #import "TSIncomingMessage.h"
 #import "TSOutgoingMessage.h"
-#import "TSStorageManager.h"
-#import <XCTest/XCTest.h>
+#import "TestAppContext.h"
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
-@interface TSThreadTest : XCTestCase
+@interface TSThreadTest : SSKBaseTestObjC
 
 @end
+
+#pragma mark -
 
 @implementation TSThreadTest
 
 - (void)setUp
 {
     [super setUp];
-
-    // Register views, etc.
-    [[TSStorageManager sharedManager] setupDatabaseWithSafeBlockingMigrations:^{}];
 }
 
 - (void)tearDown
@@ -32,84 +34,143 @@
 
 - (void)testDeletingThreadDeletesInteractions
 {
-    TSContactThread *thread = [[TSContactThread alloc] initWithUniqueId:@"fake-test-thread"];
+    TSContactThread *thread =
+        [[TSContactThread alloc] initWithUniqueId:[TSContactThread threadIdFromContactId:@"+13334445555"]];
     [thread save];
 
-    [TSInteraction removeAllObjectsInCollection];
-    XCTAssertEqual(0, [thread numberOfInteractions]);
+    [self readWithBlock:^(SDSAnyReadTransaction *_Nonnull transaction) {
+        XCTAssertEqual(0, [thread numberOfInteractionsWithTransaction:transaction]);
+    }];
 
-    TSIncomingMessage *incomingMessage = [[TSIncomingMessage alloc] initWithTimestamp:10000
-                                                                             inThread:thread
-                                                                             authorId:@"fake-author-id"
-                                                                       sourceDeviceId:OWSDevicePrimaryDeviceId
-                                                                          messageBody:@"Incoming message body"];
+    TSIncomingMessage *incomingMessage =
+        [[TSIncomingMessage alloc] initIncomingMessageWithTimestamp:10000
+                                                           inThread:thread
+                                                           authorId:@"+12223334444"
+                                                     sourceDeviceId:OWSDevicePrimaryDeviceId
+                                                        messageBody:@"Incoming message body"
+                                                      attachmentIds:@[]
+                                                   expiresInSeconds:0
+                                                      quotedMessage:nil
+                                                       contactShare:nil
+                                                        linkPreview:nil
+                                                     messageSticker:nil
+                                                    serverTimestamp:nil
+                                                    wasReceivedByUD:NO
+                                                  isViewOnceMessage:NO];
     [incomingMessage save];
 
     TSOutgoingMessage *outgoingMessage =
-        [[TSOutgoingMessage alloc] initWithTimestamp:20000 inThread:thread messageBody:@"outgoing message body"];
+        [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:20000
+                                                           inThread:thread
+                                                        messageBody:@"outgoing message body"
+                                                      attachmentIds:[NSMutableArray new]
+                                                   expiresInSeconds:0
+                                                    expireStartedAt:0
+                                                     isVoiceMessage:NO
+                                                   groupMetaMessage:TSGroupMetaMessageUnspecified
+                                                      quotedMessage:nil
+                                                       contactShare:nil
+                                                        linkPreview:nil
+                                                     messageSticker:nil
+                                                  isViewOnceMessage:NO];
     [outgoingMessage save];
 
-    XCTAssertEqual(2, [thread numberOfInteractions]);
+    [self yapReadWithBlock:^(YapDatabaseReadTransaction *_Nonnull transaction) {
+        XCTAssertEqual(2, [thread numberOfInteractionsWithTransaction:transaction.asAnyRead]);
+    }];
 
     [thread remove];
-    XCTAssertEqual(0, [thread numberOfInteractions]);
+    [self yapReadWithBlock:^(YapDatabaseReadTransaction *_Nonnull transaction) {
+        XCTAssertEqual(0, [thread numberOfInteractionsWithTransaction:transaction.asAnyRead]);
+    }];
     XCTAssertEqual(0, [TSInteraction numberOfKeysInCollection]);
 }
 
 - (void)testDeletingThreadDeletesAttachmentFiles
 {
-    TSContactThread *thread = [[TSContactThread alloc] initWithUniqueId:@"fake-test-thread"];
+    TSContactThread *thread =
+        [[TSContactThread alloc] initWithUniqueId:[TSContactThread threadIdFromContactId:@"+13334445555"]];
     [thread save];
 
     // Sanity check
-    [TSInteraction removeAllObjectsInCollection];
-    XCTAssertEqual(0, [thread numberOfInteractions]);
+    [self yapReadWithBlock:^(YapDatabaseReadTransaction *_Nonnull transaction) {
+        XCTAssertEqual(0, [thread numberOfInteractionsWithTransaction:transaction.asAnyRead]);
+    }];
 
-    NSError *error;
-    TSAttachmentStream *incomingAttachment = [[TSAttachmentStream alloc] initWithContentType:@"image/jpeg"
-                                                                              sourceFilename:nil];
-    [incomingAttachment writeData:[NSData new] error:&error];
-    [incomingAttachment save];
+    __block TSAttachmentStream *incomingAttachment;
+    [self yapWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+        incomingAttachment = [AttachmentStreamFactory createWithContentType:OWSMimeTypeImageJpeg
+                                                                 dataSource:DataSourceValue.emptyDataSource
+                                                                transaction:transaction.asAnyWrite];
+    }];
 
     // Sanity check
-    BOOL incomingFileWasCreated = [[NSFileManager defaultManager] fileExistsAtPath:[incomingAttachment filePath]];
+    BOOL incomingFileWasCreated =
+        [[NSFileManager defaultManager] fileExistsAtPath:[incomingAttachment originalFilePath]];
     XCTAssert(incomingFileWasCreated);
 
-    TSIncomingMessage *incomingMessage = [[TSIncomingMessage alloc] initWithTimestamp:10000
-                                                                             inThread:thread
-                                                                             authorId:@"fake-author-id"
-                                                                       sourceDeviceId:OWSDevicePrimaryDeviceId
-                                                                          messageBody:@"incoming message body"
-                                                                        attachmentIds:@[ incomingAttachment.uniqueId ]
-                                                                     expiresInSeconds:0];
+    TSIncomingMessage *incomingMessage =
+        [[TSIncomingMessage alloc] initIncomingMessageWithTimestamp:10000
+                                                           inThread:thread
+                                                           authorId:@"+12223334444"
+                                                     sourceDeviceId:OWSDevicePrimaryDeviceId
+                                                        messageBody:@"incoming message body"
+                                                      attachmentIds:@[ incomingAttachment.uniqueId ]
+                                                   expiresInSeconds:0
+                                                      quotedMessage:nil
+                                                       contactShare:nil
+                                                        linkPreview:nil
+                                                     messageSticker:nil
+                                                    serverTimestamp:nil
+                                                    wasReceivedByUD:NO
+                                                  isViewOnceMessage:NO];
     [incomingMessage save];
 
-    TSAttachmentStream *outgoingAttachment = [[TSAttachmentStream alloc] initWithContentType:@"image/jpeg"
-                                                                              sourceFilename:nil];
-    [outgoingAttachment writeData:[NSData new] error:&error];
-    [outgoingAttachment save];
+    __block TSAttachmentStream *outgoingAttachment;
+    [self yapWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+        outgoingAttachment = [AttachmentStreamFactory createWithContentType:OWSMimeTypeImageJpeg
+                                                                 dataSource:DataSourceValue.emptyDataSource
+                                                                transaction:transaction.asAnyWrite];
+    }];
 
     // Sanity check
-    BOOL outgoingFileWasCreated = [[NSFileManager defaultManager] fileExistsAtPath:[outgoingAttachment filePath]];
+    BOOL outgoingFileWasCreated =
+        [[NSFileManager defaultManager] fileExistsAtPath:[outgoingAttachment originalFilePath]];
     XCTAssert(outgoingFileWasCreated);
 
-    TSOutgoingMessage *outgoingMessage = [[TSOutgoingMessage alloc] initWithTimestamp:10000
-                                                                             inThread:thread
-                                                                          messageBody:@"outgoing message body"
-                                                                        attachmentIds:[@[ outgoingAttachment.uniqueId ] mutableCopy]];
+    TSOutgoingMessage *outgoingMessage =
+        [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:10000
+                                                           inThread:thread
+                                                        messageBody:@"outgoing message body"
+                                                      attachmentIds:[@[ outgoingAttachment.uniqueId ] mutableCopy]
+                                                   expiresInSeconds:0
+                                                    expireStartedAt:0
+                                                     isVoiceMessage:NO
+                                                   groupMetaMessage:TSGroupMetaMessageUnspecified
+                                                      quotedMessage:nil
+                                                       contactShare:nil
+                                                        linkPreview:nil
+                                                     messageSticker:nil
+                                                  isViewOnceMessage:NO];
     [outgoingMessage save];
 
     // Sanity check
-    XCTAssertEqual(2, [thread numberOfInteractions]);
+    [self yapReadWithBlock:^(YapDatabaseReadTransaction *_Nonnull transaction) {
+        XCTAssertEqual(2, [thread numberOfInteractionsWithTransaction:transaction.asAnyRead]);
+    }];
 
     // Actual Test Follows
     [thread remove];
-    XCTAssertEqual(0, [thread numberOfInteractions]);
+    [self yapReadWithBlock:^(YapDatabaseReadTransaction *_Nonnull transaction) {
+        XCTAssertEqual(0, [thread numberOfInteractionsWithTransaction:transaction.asAnyRead]);
+    }];
 
-    BOOL incomingFileStillExists = [[NSFileManager defaultManager] fileExistsAtPath:[incomingAttachment filePath]];
+    BOOL incomingFileStillExists =
+        [[NSFileManager defaultManager] fileExistsAtPath:[incomingAttachment originalFilePath]];
     XCTAssertFalse(incomingFileStillExists);
 
-    BOOL outgoingFileStillExists = [[NSFileManager defaultManager] fileExistsAtPath:[outgoingAttachment filePath]];
+    BOOL outgoingFileStillExists =
+        [[NSFileManager defaultManager] fileExistsAtPath:[outgoingAttachment originalFilePath]];
     XCTAssertFalse(outgoingFileStillExists);
 }
 

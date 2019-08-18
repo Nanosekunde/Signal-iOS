@@ -1,34 +1,27 @@
 //
-//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "DebugUIMisc.h"
+#import "DebugUIMessagesAssetLoader.h"
+#import "OWSBackup.h"
 #import "OWSCountryMetadata.h"
 #import "OWSTableViewController.h"
-#import "RegistrationViewController.h"
 #import "Signal-Swift.h"
 #import "ThreadUtil.h"
-#import <AFNetworking/AFNetworking.h>
 #import <AxolotlKit/PreKeyBundle.h>
+#import <SignalMessaging/AttachmentSharing.h>
 #import <SignalMessaging/Environment.h>
 #import <SignalServiceKit/OWSDisappearingConfigurationUpdateInfoMessage.h>
 #import <SignalServiceKit/OWSDisappearingMessagesConfiguration.h>
 #import <SignalServiceKit/OWSVerificationStateChangeMessage.h>
-#import <SignalServiceKit/SecurityUtils.h>
+#import <SignalServiceKit/SSKSessionStore.h>
 #import <SignalServiceKit/TSCall.h>
 #import <SignalServiceKit/TSInvalidIdentityKeyReceivingErrorMessage.h>
-#import <SignalServiceKit/TSStorageManager+SessionStore.h>
 #import <SignalServiceKit/TSThread.h>
+#import <SignalServiceKit/UIImage+OWS.h>
 
 NS_ASSUME_NONNULL_BEGIN
-
-@interface TSAccountManager (DebugUI)
-
-- (void)resetForRegistration;
-
-@end
-
-#pragma mark -
 
 @interface OWSStorage (DebugUI)
 
@@ -39,6 +32,18 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark -
 
 @implementation DebugUIMisc
+
+#pragma mark - Dependencies
+
++ (YapDatabaseConnection *)dbConnection
+{
+    return [OWSPrimaryStorage.sharedManager dbReadWriteConnection];
+}
+
++ (SDSDatabaseStorage *)databaseStorage
+{
+    return SDSDatabaseStorage.shared;
+}
 
 #pragma mark - Factory Methods
 
@@ -67,10 +72,21 @@ NS_ASSUME_NONNULL_BEGIN
                                          [DebugUIMisc clearHasDismissedOffers];
                                      }]];
 
+    [items addObject:[OWSTableItem itemWithTitle:@"Delete disappearing messages config"
+                                     actionBlock:^{
+                                         [[OWSPrimaryStorage sharedManager].newDatabaseConnection readWriteWithBlock:^(
+                                             YapDatabaseReadWriteTransaction *_Nonnull transaction) {
+                                             OWSDisappearingMessagesConfiguration *config =
+                                                 [OWSDisappearingMessagesConfiguration
+                                                     fetchOrBuildDefaultWithThreadId:thread.uniqueId
+                                                                         transaction:transaction];
+                                             [config removeWithTransaction:transaction];
+                                         }];
+                                     }]];
+
     [items addObject:[OWSTableItem
                          itemWithTitle:@"Re-register"
                            actionBlock:^{
-
                                [OWSAlerts
                                    showConfirmationAlertWithTitle:@"Re-register?"
                                                           message:@"If you proceed, you will not lose any of your "
@@ -78,7 +94,7 @@ NS_ASSUME_NONNULL_BEGIN
                                                                   @"deactivated until you complete re-registration."
                                                      proceedTitle:@"Proceed"
                                                     proceedAction:^(UIAlertAction *_Nonnull action) {
-                                                        [self reregister];
+                                                        [DebugUIMisc reregister];
                                                     }];
                            }]];
 
@@ -94,16 +110,76 @@ NS_ASSUME_NONNULL_BEGIN
                                          }]];
     }
 
+    [items addObject:[OWSTableItem itemWithTitle:@"Show 2FA Reminder"
+                                     actionBlock:^() {
+                                         OWSNavigationController *navController =
+                                             [OWS2FAReminderViewController wrappedInNavController];
+                                         [[[UIApplication sharedApplication] frontmostViewController]
+                                             presentViewController:navController
+                                                          animated:YES
+                                                        completion:nil];
+                                     }]];
+
+    [items addObject:[OWSTableItem itemWithTitle:@"Reset 2FA Repetition Interval"
+                                     actionBlock:^() {
+                                         [OWS2FAManager.sharedManager setDefaultRepetitionInterval];
+                                     }]];
+
+#ifdef DEBUG
+    [items addObject:[OWSTableItem subPageItemWithText:@"Share UIImage"
+                                           actionBlock:^(UIViewController *viewController) {
+                                               UIImage *image =
+                                               [UIImage imageWithColor:UIColor.redColor size:CGSizeMake(1.f, 1.f)];
+                                               [AttachmentSharing showShareUIForUIImage:image];
+                                           }]];
+    [items addObject:[OWSTableItem subPageItemWithText:@"Share 2 Images"
+                                           actionBlock:^(UIViewController *viewController) {
+                                               [DebugUIMisc shareImages:2];
+                                           }]];
+    [items addObject:[OWSTableItem subPageItemWithText:@"Share 2 Videos"
+                                           actionBlock:^(UIViewController *viewController) {
+                                               [DebugUIMisc shareVideos:2];
+                                           }]];
+    [items addObject:[OWSTableItem subPageItemWithText:@"Share 2 PDFs"
+                                           actionBlock:^(UIViewController *viewController) {
+                                               [DebugUIMisc sharePDFs:2];
+                                           }]];
+#endif
+
+    [items
+        addObject:[OWSTableItem
+                      itemWithTitle:@"Increment Database Extension Versions"
+                        actionBlock:^() {
+                            for (NSString *extensionName in OWSPrimaryStorage.sharedManager.registeredExtensionNames) {
+                                [OWSStorage incrementVersionOfDatabaseExtension:extensionName];
+                            }
+                        }]];
+
+    [items addObject:[OWSTableItem itemWithTitle:@"Fetch system contacts"
+                                     actionBlock:^() {
+                                         [Environment.shared.contactsManager requestSystemContactsOnce];
+                                     }]];
+
+    [items addObject:[OWSTableItem itemWithTitle:@"Cycle websockets"
+                                     actionBlock:^() {
+                                         [SSKEnvironment.shared.socketManager cycleSocket];
+                                     }]];
+
     return [OWSTableSection sectionWithTitle:self.name items:items];
 }
 
-- (void)reregister
++ (void)reregister
 {
-    DDLogInfo(@"%@ re-registering.", self.logTag);
-    [[TSAccountManager sharedInstance] resetForRegistration];
-    [[Environment current].preferences unsetRecordedAPNSTokens];
+    OWSLogInfo(@"re-registering.");
 
-    RegistrationViewController *viewController = [RegistrationViewController new];
+    if (![[TSAccountManager sharedInstance] resetForReregistration]) {
+        OWSFailDebug(@"could not reset for re-registration.");
+        return;
+    }
+
+    [Environment.shared.preferences unsetRecordedAPNSTokens];
+
+    UIViewController *viewController = [[OnboardingController new] initialViewController];
     OWSNavigationController *navigationController =
         [[OWSNavigationController alloc] initWithRootViewController:viewController];
     navigationController.navigationBarHidden = YES;
@@ -131,16 +207,14 @@ NS_ASSUME_NONNULL_BEGIN
         countryMetadata = [OWSCountryMetadata countryMetadataForCountryCode:countryCode];
     }
 
-    OWSAssert(countryMetadata);
+    OWSAssertDebug(countryMetadata);
     OWSSignalService.sharedInstance.manualCensorshipCircumventionCountryCode = countryCode;
-    OWSSignalService.sharedInstance.manualCensorshipCircumventionDomain = countryMetadata.googleDomain;
-
     OWSSignalService.sharedInstance.isCensorshipCircumventionManuallyActivated = isEnabled;
 }
 
 + (void)clearHasDismissedOffers
 {
-    [TSStorageManager.dbReadWriteConnection
+    [OWSPrimaryStorage.dbReadWriteConnection
         readWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
             NSMutableArray<TSContactThread *> *contactThreads = [NSMutableArray new];
             [transaction
@@ -164,19 +238,18 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (void)sendEncryptedDatabase:(TSThread *)thread
 {
-    NSString *temporaryDirectory = NSTemporaryDirectory();
-    NSString *fileName = [[NSUUID UUID].UUIDString stringByAppendingString:@".sqlite"];
-    NSString *filePath = [temporaryDirectory stringByAppendingPathComponent:fileName];
+    NSString *filePath = [OWSFileSystem temporaryFilePathWithFileExtension:@"sqlite"];
+    NSString *fileName = filePath.lastPathComponent;
 
     __block BOOL success;
-    [TSStorageManager.sharedManager.newDatabaseConnection
+    [OWSPrimaryStorage.sharedManager.newDatabaseConnection
         readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
             NSError *error;
-            success = [[NSFileManager defaultManager] copyItemAtPath:TSStorageManager.databaseFilePath
+            success = [[NSFileManager defaultManager] copyItemAtPath:OWSPrimaryStorage.databaseFilePath
                                                               toPath:filePath
                                                                error:&error];
             if (!success || error) {
-                OWSFail(@"%@ Could not copy database file: %@.", self.logTag, error);
+                OWSFailDebug(@"Could not copy database file: %@.", error);
                 success = NO;
             }
         }];
@@ -185,43 +258,108 @@ NS_ASSUME_NONNULL_BEGIN
         return;
     }
 
-    OWSMessageSender *messageSender = [Environment current].messageSender;
     NSString *utiType = [MIMETypeUtil utiTypeForFileExtension:fileName.pathExtension];
-    DataSource *_Nullable dataSource = [DataSourcePath dataSourceWithFilePath:filePath];
+    DataSource *_Nullable dataSource = [DataSourcePath dataSourceWithFilePath:filePath shouldDeleteOnDeallocation:YES];
     [dataSource setSourceFilename:fileName];
     SignalAttachment *attachment = [SignalAttachment attachmentWithDataSource:dataSource dataUTI:utiType];
-    NSData *databasePassword = [TSStorageManager.sharedManager databasePassword];
+    NSData *databasePassword = [OWSPrimaryStorage.sharedManager databasePassword];
     attachment.captionText = [databasePassword hexadecimalString];
+    [self sendAttachment:attachment thread:thread];
+}
+
++ (void)sendAttachment:(SignalAttachment *)attachment thread:(TSThread *)thread
+{
     if (!attachment || [attachment hasError]) {
-        OWSFail(@"%@ attachment[%@]: %@", self.logTag, [attachment sourceFilename], [attachment errorName]);
+        OWSFailDebug(@"attachment[%@]: %@", [attachment sourceFilename], [attachment errorName]);
         return;
     }
-    [ThreadUtil sendMessageWithAttachment:attachment inThread:thread messageSender:messageSender completion:nil];
+    [self.databaseStorage readWithBlock:^(SDSAnyReadTransaction *_Nonnull transaction) {
+        [ThreadUtil enqueueMessageWithText:nil
+                          mediaAttachments:@[ attachment ]
+                                  inThread:thread
+                          quotedReplyModel:nil
+                          linkPreviewDraft:nil
+                               transaction:transaction];
+    }];
 }
 
 + (void)sendUnencryptedDatabase:(TSThread *)thread
 {
-    NSString *temporaryDirectory = NSTemporaryDirectory();
-    NSString *fileName = [[NSUUID UUID].UUIDString stringByAppendingString:@".sqlite"];
-    NSString *filePath = [temporaryDirectory stringByAppendingPathComponent:fileName];
+    NSString *filePath = [OWSFileSystem temporaryFilePathWithFileExtension:@"sqlite"];
+    NSString *fileName = filePath.lastPathComponent;
 
-    NSError *error = [TSStorageManager.sharedManager.newDatabaseConnection backupToPath:filePath];
+    NSError *error = [OWSPrimaryStorage.sharedManager.newDatabaseConnection backupToPath:filePath];
     if (error) {
-        OWSFail(@"%@ Could not copy database file: %@.", self.logTag, error);
+        OWSFailDebug(@"Could not copy database file: %@.", error);
         return;
     }
 
-    OWSMessageSender *messageSender = [Environment current].messageSender;
     NSString *utiType = [MIMETypeUtil utiTypeForFileExtension:fileName.pathExtension];
-    DataSource *_Nullable dataSource = [DataSourcePath dataSourceWithFilePath:filePath];
+    DataSource *_Nullable dataSource = [DataSourcePath dataSourceWithFilePath:filePath shouldDeleteOnDeallocation:YES];
     [dataSource setSourceFilename:fileName];
     SignalAttachment *attachment = [SignalAttachment attachmentWithDataSource:dataSource dataUTI:utiType];
-    if (!attachment || [attachment hasError]) {
-        OWSFail(@"%@ attachment[%@]: %@", self.logTag, [attachment sourceFilename], [attachment errorName]);
-        return;
-    }
-    [ThreadUtil sendMessageWithAttachment:attachment inThread:thread messageSender:messageSender completion:nil];
+    [self sendAttachment:attachment thread:thread];
 }
+
+#ifdef DEBUG
+
++ (void)shareAssets:(NSUInteger)count
+   fromAssetLoaders:(NSArray<DebugUIMessagesAssetLoader *> *)assetLoaders
+{
+    [DebugUIMessagesAssetLoader prepareAssetLoaders:assetLoaders
+                                            success:^{
+                                                      [self shareAssets:count
+                                               fromPreparedAssetLoaders:assetLoaders];
+                                                      }
+                                            failure:^{
+                                                OWSLogError(@"Could not prepare asset loaders.");
+                                                      }];
+}
+
++ (void)shareAssets:(NSUInteger)count
+   fromPreparedAssetLoaders:(NSArray<DebugUIMessagesAssetLoader *> *)assetLoaders
+{
+    __block NSMutableArray<NSURL *> *urls = [NSMutableArray new];
+    for (NSUInteger i = 0;i < count;i++) {
+        DebugUIMessagesAssetLoader *assetLoader = assetLoaders[arc4random_uniform((uint32_t) assetLoaders.count)];
+        NSString *filePath = [OWSFileSystem temporaryFilePathWithFileExtension:assetLoader.filePath.pathExtension];
+        NSError *error;
+        [[NSFileManager defaultManager] copyItemAtPath:assetLoader.filePath toPath:filePath error:&error];
+        OWSAssertDebug(!error);
+        [urls addObject:[NSURL fileURLWithPath:filePath]];
+    }
+    OWSLogVerbose(@"urls: %@", urls);
+    [AttachmentSharing showShareUIForURLs:urls completion:^{
+                                                            urls = nil;
+                                                            }];
+}
+
++ (void)shareImages:(NSUInteger)count
+{
+    [self shareAssets:count
+     fromAssetLoaders:@[
+                        [DebugUIMessagesAssetLoader jpegInstance],
+                        [DebugUIMessagesAssetLoader tinyPngInstance],
+                        ]];
+}
+
++ (void)shareVideos:(NSUInteger)count
+{
+    [self shareAssets:count
+     fromAssetLoaders:@[
+                        [DebugUIMessagesAssetLoader mp4Instance],
+                        ]];
+}
+
++ (void)sharePDFs:(NSUInteger)count
+{
+    [self shareAssets:count
+     fromAssetLoaders:@[
+                        [DebugUIMessagesAssetLoader tinyPdfInstance],
+                        ]];
+}
+
+#endif
 
 @end
 

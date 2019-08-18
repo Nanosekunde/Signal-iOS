@@ -1,9 +1,10 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSViewController.h"
 #import "UIView+OWS.h"
+#import <SignalMessaging/Theme.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -11,6 +12,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, weak) UIView *bottomLayoutView;
 @property (nonatomic) NSLayoutConstraint *bottomLayoutConstraint;
+@property (nonatomic) BOOL shouldAnimateBottomLayout;
 
 @end
 
@@ -21,15 +23,100 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)dealloc
 {
     // Surface memory leaks by logging the deallocation of view controllers.
-    DDLogVerbose(@"Dealloc: %@", self.class);
+    OWSLogVerbose(@"Dealloc: %@", self.class);
 
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
-- (void)autoPinViewToBottomGuideOrKeyboard:(UIView *)view
+- (instancetype)initWithNibName:(nullable NSString *)nibNameOrNil bundle:(nullable NSBundle *)nibBundleOrNil
 {
-    OWSAssert(view);
-    OWSAssert(!self.bottomLayoutConstraint);
+    self = [super initWithNibName:nibNameOrNil bundle:nibBundleOrNil];
+    if (!self) {
+        self.shouldUseTheme = YES;
+        return self;
+    }
+
+    [self observeActivation];
+
+    return self;
+}
+
+- (nullable instancetype)initWithCoder:(NSCoder *)aDecoder
+{
+    self = [super initWithCoder:aDecoder];
+    if (!self) {
+        self.shouldUseTheme = YES;
+        return self;
+    }
+
+    [self observeActivation];
+
+    return self;
+}
+
+#pragma mark - View Lifecycle
+
+- (void)viewDidAppear:(BOOL)animated
+{
+    [super viewDidAppear:animated];
+
+    self.shouldAnimateBottomLayout = YES;
+
+#ifdef DEBUG
+    [self ensureNavbarAccessibilityIds];
+#endif
+}
+
+#ifdef DEBUG
+- (void)ensureNavbarAccessibilityIds
+{
+    UINavigationBar *_Nullable navigationBar = self.navigationController.navigationBar;
+    if (!navigationBar) {
+        return;
+    }
+    // There isn't a great way to assign accessibilityIdentifiers to default
+    // navbar buttons, e.g. the back button.  As a (DEBUG-only) hack, we
+    // assign accessibilityIds to any navbar controls which don't already have
+    // one.  This should offer a reliable way for automated scripts to find
+    // these controls.
+    //
+    // UINavigationBar often discards and rebuilds new contents, e.g. between
+    // presentations of the view, so we need to do this every time the view
+    // appears.  We don't do any checking for accessibilityIdentifier collisions
+    // so we're counting on the fact that navbar contents are short-lived.
+    __block int accessibilityIdCounter = 0;
+    [navigationBar traverseViewHierarchyWithVisitor:^(UIView *view) {
+        if ([view isKindOfClass:[UIControl class]] && view.accessibilityIdentifier == nil) {
+            // The view should probably be an instance of _UIButtonBarButton or _UIModernBarButton.
+            view.accessibilityIdentifier = [NSString stringWithFormat:@"navbar-%d", accessibilityIdCounter];
+            accessibilityIdCounter++;
+        }
+    }];
+}
+#endif
+
+- (void)viewDidDisappear:(BOOL)animated
+{
+    [super viewDidDisappear:animated];
+
+    self.shouldAnimateBottomLayout = NO;
+}
+
+- (void)viewDidLoad
+{
+    [super viewDidLoad];
+
+    if (self.shouldUseTheme) {
+        self.view.backgroundColor = Theme.backgroundColor;
+    }
+}
+
+#pragma mark -
+
+- (void)autoPinViewToBottomOfViewControllerOrKeyboard:(UIView *)view avoidNotch:(BOOL)avoidNotch
+{
+    OWSAssertDebug(view);
+    OWSAssertDebug(!self.bottomLayoutConstraint);
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(keyboardWillShow:)
@@ -57,40 +144,61 @@ NS_ASSUME_NONNULL_BEGIN
                                                object:nil];
 
     self.bottomLayoutView = view;
-    self.bottomLayoutConstraint = [view autoPinToBottomLayoutGuideOfViewController:self withInset:0];
+    if (avoidNotch) {
+        self.bottomLayoutConstraint = [view autoPinToBottomLayoutGuideOfViewController:self withInset:0.f];
+    } else {
+        self.bottomLayoutConstraint = [view autoPinEdge:ALEdgeBottom toEdge:ALEdgeBottom ofView:self.view];
+    }
+}
+
+- (void)observeActivation
+{
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(owsViewControllerApplicationDidBecomeActive:)
+                                                 name:UIApplicationDidBecomeActiveNotification
+                                               object:nil];
+}
+
+- (void)owsViewControllerApplicationDidBecomeActive:(NSNotification *)notification
+{
+    [self setNeedsStatusBarAppearanceUpdate];
 }
 
 - (void)keyboardWillShow:(NSNotification *)notification
 {
-    [self handleKeyboardNotification:notification];
+    [self handleKeyboardNotificationBase:notification];
 }
 
 - (void)keyboardDidShow:(NSNotification *)notification
 {
-    [self handleKeyboardNotification:notification];
+    [self handleKeyboardNotificationBase:notification];
 }
 
 - (void)keyboardWillHide:(NSNotification *)notification
 {
-    [self handleKeyboardNotification:notification];
+    [self handleKeyboardNotificationBase:notification];
 }
 
 - (void)keyboardDidHide:(NSNotification *)notification
 {
-    [self handleKeyboardNotification:notification];
+    [self handleKeyboardNotificationBase:notification];
 }
 
 - (void)keyboardWillChangeFrame:(NSNotification *)notification
 {
-    [self handleKeyboardNotification:notification];
+    [self handleKeyboardNotificationBase:notification];
 }
 
 - (void)keyboardDidChangeFrame:(NSNotification *)notification
 {
-    [self handleKeyboardNotification:notification];
+    [self handleKeyboardNotificationBase:notification];
 }
 
-- (void)handleKeyboardNotification:(NSNotification *)notification
+// We use the name `handleKeyboardNotificationBase` instead of
+// `handleKeyboardNotification` to avoid accidentally
+// calling similarly methods with that name in subclasses,
+// e.g. ConversationViewController.
+- (void)handleKeyboardNotificationBase:(NSNotification *)notification
 {
     OWSAssertIsOnMainThread();
 
@@ -102,7 +210,7 @@ NS_ASSUME_NONNULL_BEGIN
 
     NSValue *_Nullable keyboardEndFrameValue = userInfo[UIKeyboardFrameEndUserInfoKey];
     if (!keyboardEndFrameValue) {
-        OWSFail(@"%@ Missing keyboard end frame", self.logTag);
+        OWSFailDebug(@"Missing keyboard end frame");
         return;
     }
 
@@ -117,11 +225,34 @@ NS_ASSUME_NONNULL_BEGIN
     // bar.
     CGFloat offset = -MAX(0, (self.view.height - self.bottomLayoutGuide.length - keyboardEndFrameConverted.origin.y));
 
-    // There's no need to use: [UIView animateWithDuration:...].
-    // Any layout changes made during these notifications are
-    // automatically animated.
-    self.bottomLayoutConstraint.constant = offset;
-    [self.bottomLayoutView.superview layoutIfNeeded];
+    dispatch_block_t updateLayout = ^{
+        if (self.shouldBottomViewReserveSpaceForKeyboard && offset >= 0) {
+            // To avoid unnecessary animations / layout jitter,
+            // some views never reclaim layout space when the keyboard is dismissed.
+            //
+            // They _do_ need to relayout if the user switches keyboards.
+            return;
+        }
+        self.bottomLayoutConstraint.constant = offset;
+        [self.bottomLayoutView.superview layoutIfNeeded];
+    };
+
+
+    if (self.shouldAnimateBottomLayout && CurrentAppContext().isAppForegroundAndActive) {
+        updateLayout();
+    } else {
+        // UIKit by default animates all changes in response to keyboard events.
+        // We want to suppress those animations if the view isn't visible,
+        // otherwise presentation animations don't work properly.
+        [UIView performWithoutAnimation:updateLayout];
+    }
+}
+
+#pragma mark - Orientation
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations
+{
+    return UIInterfaceOrientationMaskAllButUpsideDown;
 }
 
 @end

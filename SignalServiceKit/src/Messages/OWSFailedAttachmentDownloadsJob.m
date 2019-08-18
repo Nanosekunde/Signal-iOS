@@ -1,10 +1,11 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSFailedAttachmentDownloadsJob.h"
+#import "OWSPrimaryStorage.h"
 #import "TSAttachmentPointer.h"
-#import "TSStorageManager.h"
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <YapDatabase/YapDatabase.h>
 #import <YapDatabase/YapDatabaseQuery.h>
 #import <YapDatabase/YapDatabaseSecondaryIndex.h>
@@ -16,7 +17,7 @@ static NSString *const OWSFailedAttachmentDownloadsJobAttachmentStateIndex = @"i
 
 @interface OWSFailedAttachmentDownloadsJob ()
 
-@property (nonatomic, readonly) TSStorageManager *storageManager;
+@property (nonatomic, readonly) OWSPrimaryStorage *primaryStorage;
 
 @end
 
@@ -24,14 +25,14 @@ static NSString *const OWSFailedAttachmentDownloadsJobAttachmentStateIndex = @"i
 
 @implementation OWSFailedAttachmentDownloadsJob
 
-- (instancetype)initWithStorageManager:(TSStorageManager *)storageManager
+- (instancetype)initWithPrimaryStorage:(OWSPrimaryStorage *)primaryStorage
 {
     self = [super init];
     if (!self) {
         return self;
     }
 
-    _storageManager = storageManager;
+    _primaryStorage = primaryStorage;
 
     return self;
 }
@@ -39,7 +40,7 @@ static NSString *const OWSFailedAttachmentDownloadsJobAttachmentStateIndex = @"i
 - (NSArray<NSString *> *)fetchAttemptingOutAttachmentIdsWithTransaction:
     (YapDatabaseReadWriteTransaction *_Nonnull)transaction
 {
-    OWSAssert(transaction);
+    OWSAssertDebug(transaction);
 
     NSMutableArray<NSString *> *attachmentIds = [NSMutableArray new];
 
@@ -59,17 +60,18 @@ static NSString *const OWSFailedAttachmentDownloadsJobAttachmentStateIndex = @"i
 - (void)enumerateAttemptingOutAttachmentsWithBlock:(void (^_Nonnull)(TSAttachmentPointer *attachment))block
                                        transaction:(YapDatabaseReadWriteTransaction *_Nonnull)transaction
 {
-    OWSAssert(transaction);
+    OWSAssertDebug(transaction);
 
     // Since we can't directly mutate the enumerated attachments, we store only their ids in hopes
     // of saving a little memory and then enumerate the (larger) TSAttachment objects one at a time.
     for (NSString *attachmentId in [self fetchAttemptingOutAttachmentIdsWithTransaction:transaction]) {
-        TSAttachmentPointer *_Nullable attachment =
-            [TSAttachmentPointer fetchObjectWithUniqueID:attachmentId transaction:transaction];
+        TSAttachment *_Nullable attachment =
+            [TSAttachment anyFetchWithUniqueId:attachmentId transaction:transaction.asAnyRead];
         if ([attachment isKindOfClass:[TSAttachmentPointer class]]) {
-            block(attachment);
+            TSAttachmentPointer *pointer = (TSAttachmentPointer *)attachment;
+            block(pointer);
         } else {
-            DDLogError(@"%@ unexpected object: %@", self.logTag, attachment);
+            OWSLogError(@"unexpected object: %@", attachment);
         }
     }
 }
@@ -77,21 +79,27 @@ static NSString *const OWSFailedAttachmentDownloadsJobAttachmentStateIndex = @"i
 - (void)run
 {
     __block uint count = 0;
-    [[self.storageManager newDatabaseConnection]
+    [[self.primaryStorage newDatabaseConnection]
         readWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
             [self enumerateAttemptingOutAttachmentsWithBlock:^(TSAttachmentPointer *attachment) {
                 // sanity check
                 if (attachment.state != TSAttachmentPointerStateFailed) {
-                    DDLogDebug(@"%@ marking attachment as failed", self.logTag);
-                    attachment.state = TSAttachmentPointerStateFailed;
-                    [attachment saveWithTransaction:transaction];
+                    [attachment anyUpdateWithTransaction:transaction.asAnyWrite
+                                                   block:^(TSAttachment *attachment) {
+                                                       if (![attachment isKindOfClass:[TSAttachmentPointer class]]) {
+                                                           OWSFailDebug(@"unexpected object: %@", attachment);
+                                                           return;
+                                                       }
+                                                       TSAttachmentPointer *pointer = (TSAttachmentPointer *)attachment;
+                                                       pointer.state = TSAttachmentPointerStateFailed;
+                                                   }];
                     count++;
                 }
             }
                                                  transaction:transaction];
         }];
 
-    DDLogDebug(@"%@ Marked %u attachments as unsent", self.logTag, count);
+    OWSLogDebug(@"Marked %u attachments as unsent", count);
 }
 
 #pragma mark - YapDatabaseExtension
@@ -115,27 +123,27 @@ static NSString *const OWSFailedAttachmentDownloadsJobAttachmentStateIndex = @"i
             dict[OWSFailedAttachmentDownloadsJobAttachmentStateColumn] = @(attachment.state);
         }];
 
-    return [[YapDatabaseSecondaryIndex alloc] initWithSetup:setup handler:handler];
+    return [[YapDatabaseSecondaryIndex alloc] initWithSetup:setup handler:handler versionTag:nil];
 }
 
+#ifdef DEBUG
 // Useful for tests, don't use in app startup path because it's slow.
 - (void)blockingRegisterDatabaseExtensions
 {
-    [self.storageManager registerExtension:[self.class indexDatabaseExtension]
+    [self.primaryStorage registerExtension:[self.class indexDatabaseExtension]
                                   withName:OWSFailedAttachmentDownloadsJobAttachmentStateIndex];
 }
+#endif
 
-+ (void)asyncRegisterDatabaseExtensionsWithStorageManager:(TSStorageManager *)storageManager
++ (NSString *)databaseExtensionName
 {
-    [storageManager asyncRegisterExtension:[self indexDatabaseExtension]
-                                  withName:OWSFailedAttachmentDownloadsJobAttachmentStateIndex
-                           completionBlock:^(BOOL ready) {
-                               if (ready) {
-                                   DDLogDebug(@"%@ completed registering extension async.", self.logTag);
-                               } else {
-                                   DDLogError(@"%@ failed registering extension async.", self.logTag);
-                               }
-                           }];
+    return OWSFailedAttachmentDownloadsJobAttachmentStateIndex;
+}
+
++ (void)asyncRegisterDatabaseExtensionsWithPrimaryStorage:(OWSStorage *)storage
+{
+    [storage asyncRegisterExtension:[self indexDatabaseExtension]
+                           withName:OWSFailedAttachmentDownloadsJobAttachmentStateIndex];
 }
 
 @end

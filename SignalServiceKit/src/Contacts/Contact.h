@@ -1,23 +1,19 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
-#import <AddressBook/AddressBook.h>
 #import <Mantle/MTLModel.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 /**
- *
- * Contact represents relevant information related to a contact from the user's
- * contact list.
- *
+ * An adapter for the system contacts
  */
 
 @class CNContact;
 @class PhoneNumber;
-@class UIImage;
 @class SignalRecipient;
+@class UIImage;
 @class YapDatabaseReadTransaction;
 
 @interface Contact : MTLModel
@@ -32,11 +28,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (readonly, nonatomic) NSArray<NSString *> *emails;
 @property (readonly, nonatomic) NSString *uniqueId;
 @property (nonatomic, readonly) BOOL isSignalContact;
-#if TARGET_OS_IOS
-@property (nullable, readonly, nonatomic) UIImage *image;
-@property (readonly, nonatomic) ABRecordID recordID;
-@property (nullable, nonatomic, readonly) CNContact *cnContact;
-#endif // TARGET_OS_IOS
+@property (nonatomic, readonly) NSString *cnContactId;
 
 - (NSArray<SignalRecipient *> *)signalRecipientsWithTransaction:(YapDatabaseReadTransaction *)transaction;
 // TODO: Remove this method.
@@ -44,19 +36,22 @@ NS_ASSUME_NONNULL_BEGIN
 
 #if TARGET_OS_IOS
 
-- (instancetype)initWithFirstName:(nullable NSString *)firstName
-                         lastName:(nullable NSString *)lastName
-             userTextPhoneNumbers:(NSArray<NSString *> *)phoneNumbers
-                        imageData:(nullable NSData *)imageData
-                        contactID:(ABRecordID)record;
-
-- (instancetype)initWithSystemContact:(CNContact *)contact NS_AVAILABLE_IOS(9_0);
+- (instancetype)initWithSystemContact:(CNContact *)cnContact NS_AVAILABLE_IOS(9_0);
++ (nullable Contact *)contactWithVCardData:(NSData *)data;
++ (nullable CNContact *)cnContactWithVCardData:(NSData *)data;
 
 - (NSString *)nameForPhoneNumber:(NSString *)recipientId;
 
 #endif // TARGET_OS_IOS
 
 + (NSComparator)comparatorSortingNamesByFirstThenLast:(BOOL)firstNameOrdering;
++ (NSString *)formattedFullNameWithCNContact:(CNContact *)cnContact NS_SWIFT_NAME(formattedFullName(cnContact:));
++ (nullable NSString *)localizedStringForCNLabel:(nullable NSString *)cnLabel;
+
++ (CNContact *)mergeCNContact:(CNContact *)oldCNContact
+                 newCNContact:(CNContact *)newCNContact NS_SWIFT_NAME(merge(cnContact:newCNContact:));
+
++ (nullable NSData *)avatarDataForCNContact:(nullable CNContact *)cnContact;
 
 @end
 

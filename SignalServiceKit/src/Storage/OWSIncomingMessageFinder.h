@@ -1,20 +1,15 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
-@class TSStorageManager;
+@class OWSStorage;
 @class YapDatabaseReadTransaction;
 
 @interface OWSIncomingMessageFinder : NSObject
 
-- (instancetype)initWithStorageManager:(TSStorageManager *)storageManager NS_DESIGNATED_INITIALIZER;
-
-/**
- * Must be called before using this finder.
- */
-+ (void)asyncRegisterExtensionWithStorageManager:(TSStorageManager *)storageManager;
++ (void)asyncRegisterExtensionWithPrimaryStorage:(OWSStorage *)storage;
 
 /**
  * Detects existance of a duplicate incoming message.

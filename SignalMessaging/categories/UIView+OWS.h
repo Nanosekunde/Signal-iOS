@@ -1,11 +1,14 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import <PureLayout/PureLayout.h>
+#import <SignalServiceKit/OWSMath.h>
 #import <UIKit/UIKit.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+typedef void (^UIViewVisitorBlock)(UIView *view);
 
 // A convenience method for doing responsive layout. Scales between two
 // reference values (for iPhone 5 and iPhone 7 Plus) to the current device
@@ -23,11 +26,13 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value);
 // Pins the width of this view to the width of its superview, with uniform margins.
 - (NSArray<NSLayoutConstraint *> *)autoPinWidthToSuperviewWithMargin:(CGFloat)margin;
 - (NSArray<NSLayoutConstraint *> *)autoPinWidthToSuperview;
+- (NSArray<NSLayoutConstraint *> *)autoPinWidthToSuperviewMargins;
 // Pins the height of this view to the height of its superview, with uniform margins.
 - (NSArray<NSLayoutConstraint *> *)autoPinHeightToSuperviewWithMargin:(CGFloat)margin;
 - (NSArray<NSLayoutConstraint *> *)autoPinHeightToSuperview;
 
-- (NSArray<NSLayoutConstraint *> *)autoPinToSuperviewEdges;
+- (NSArray<NSLayoutConstraint *> *)ows_autoPinToSuperviewEdges;
+- (NSArray<NSLayoutConstraint *> *)ows_autoPinToSuperviewMargins;
 
 - (NSLayoutConstraint *)autoHCenterInSuperview;
 - (NSLayoutConstraint *)autoVCenterInSuperview;
@@ -36,7 +41,9 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value);
 - (void)autoPinHeightToHeightOfView:(UIView *)view;
 
 - (NSLayoutConstraint *)autoPinToSquareAspectRatio;
+- (NSLayoutConstraint *)autoPinToAspectRatioWithSize:(CGSize)size;
 - (NSLayoutConstraint *)autoPinToAspectRatio:(CGFloat)ratio;
+- (NSLayoutConstraint *)autoPinToAspectRatio:(CGFloat)ratio relation:(NSLayoutRelation)relation;
 
 #pragma mark - Content Hugging and Compression Resistance
 
@@ -77,26 +84,41 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value);
 // contents.
 //
 // NOTE: the margin values are inverted in RTL layouts.
-- (BOOL)isRTL;
-- (NSArray<NSLayoutConstraint *> *)autoPinLeadingAndTrailingToSuperview;
-- (NSLayoutConstraint *)autoPinLeadingToSuperview;
-- (NSLayoutConstraint *)autoPinLeadingToSuperviewWithMargin:(CGFloat)margin;
-- (NSLayoutConstraint *)autoPinTrailingToSuperview;
-- (NSLayoutConstraint *)autoPinTrailingToSuperviewWithMargin:(CGFloat)margin;
-- (NSLayoutConstraint *)autoPinLeadingToTrailingOfView:(UIView *)view;
-- (NSLayoutConstraint *)autoPinLeadingToTrailingOfView:(UIView *)view margin:(CGFloat)margin;
-- (NSLayoutConstraint *)autoPinTrailingToLeadingOfView:(UIView *)view;
-- (NSLayoutConstraint *)autoPinTrailingToLeadingOfView:(UIView *)view margin:(CGFloat)margin;
-- (NSLayoutConstraint *)autoPinLeadingToView:(UIView *)view;
-- (NSLayoutConstraint *)autoPinLeadingToView:(UIView *)view margin:(CGFloat)margin;
-- (NSLayoutConstraint *)autoPinTrailingToView:(UIView *)view;
-- (NSLayoutConstraint *)autoPinTrailingToView:(UIView *)view margin:(CGFloat)margin;
+
+- (NSArray<NSLayoutConstraint *> *)autoPinLeadingAndTrailingToSuperviewMargin;
+- (NSLayoutConstraint *)autoPinLeadingToSuperviewMargin;
+- (NSLayoutConstraint *)autoPinLeadingToSuperviewMarginWithInset:(CGFloat)margin;
+- (NSLayoutConstraint *)autoPinTrailingToSuperviewMargin;
+- (NSLayoutConstraint *)autoPinTrailingToSuperviewMarginWithInset:(CGFloat)margin;
+
+- (NSLayoutConstraint *)autoPinTopToSuperviewMargin;
+- (NSLayoutConstraint *)autoPinTopToSuperviewMarginWithInset:(CGFloat)margin;
+- (NSLayoutConstraint *)autoPinBottomToSuperviewMargin;
+- (NSLayoutConstraint *)autoPinBottomToSuperviewMarginWithInset:(CGFloat)margin;
+
+- (NSLayoutConstraint *)autoPinLeadingToTrailingEdgeOfView:(UIView *)view;
+- (NSLayoutConstraint *)autoPinLeadingToTrailingEdgeOfView:(UIView *)view offset:(CGFloat)margin;
+- (NSLayoutConstraint *)autoPinTrailingToLeadingEdgeOfView:(UIView *)view;
+- (NSLayoutConstraint *)autoPinTrailingToLeadingEdgeOfView:(UIView *)view offset:(CGFloat)margin;
+- (NSLayoutConstraint *)autoPinLeadingToEdgeOfView:(UIView *)view;
+- (NSLayoutConstraint *)autoPinLeadingToEdgeOfView:(UIView *)view offset:(CGFloat)margin;
+- (NSLayoutConstraint *)autoPinTrailingToEdgeOfView:(UIView *)view;
+- (NSLayoutConstraint *)autoPinTrailingToEdgeOfView:(UIView *)view offset:(CGFloat)margin;
 // Return Right on LTR and Left on RTL.
 - (NSTextAlignment)textAlignmentUnnatural;
 // Leading and trailing anchors honor layout margins.
 // When using a UIView as a "div" to structure layout, we don't want it to have margins.
-+ (UIView *)containerView;
 - (void)setHLayoutMargins:(CGFloat)value;
+
+- (NSArray<NSLayoutConstraint *> *)autoPinToEdgesOfView:(UIView *)view;
+
+- (void)traverseViewHierarchyWithVisitor:(UIViewVisitorBlock)visitor;
+
+#pragma mark - Containers
+
++ (UIView *)containerView;
+
++ (UIView *)verticalStackWithSubviews:(NSArray<UIView *> *)subviews spacing:(int)spacing;
 
 #pragma mark - Debugging
 
@@ -106,6 +128,55 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value);
 // Add red border to self, and all subviews recursively.
 - (void)addRedBorderRecursively;
 
+#ifdef DEBUG
+- (void)logFrame;
+- (void)logFrameWithLabel:(NSString *)label;
+- (void)logFrameLater;
+- (void)logFrameLaterWithLabel:(NSString *)label;
+- (void)logHierarchyUpwardLaterWithLabel:(NSString *)label;
+#endif
+
 @end
+
+#pragma mark -
+
+@interface UIScrollView (OWS)
+
+// Returns YES if contentInsetAdjustmentBehavior is disabled.
+- (BOOL)applyScrollViewInsetsFix;
+
+@end
+
+#pragma mark -
+
+@interface UIStackView (OWS)
+
+- (UIView *)addBackgroundViewWithBackgroundColor:(UIColor *)backgroundColor;
+
+- (UIView *)addBackgroundViewWithBackgroundColor:(UIColor *)backgroundColor cornerRadius:(CGFloat)cornerRadius;
+
+- (UIView *)addBorderViewWithColor:(UIColor *)color strokeWidth:(CGFloat)strokeWidth cornerRadius:(CGFloat)cornerRadius;
+
+@end
+
+#pragma mark -
+
+@interface UIAlertAction (OWS)
+
++ (instancetype)actionWithTitle:(nullable NSString *)title
+        accessibilityIdentifier:(nullable NSString *)accessibilityIdentifier
+                          style:(UIAlertActionStyle)style
+                        handler:(void (^__nullable)(UIAlertAction *action))handler;
+
+@end
+
+#pragma mark - Macros
+
+CGFloat CGHairlineWidth(void);
+
+/// Primarily useful to adjust border widths to
+/// compensate for antialiasing around light
+/// color curves on dark backgrounds.
+CGFloat CGHairlineWidthFraction(CGFloat);
 
 NS_ASSUME_NONNULL_END

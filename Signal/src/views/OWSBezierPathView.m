@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSBezierPathView.h"
@@ -60,14 +60,14 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)setConfigureShapeLayerBlock:(ConfigureShapeLayerBlock)configureShapeLayerBlock
 {
-    OWSAssert(configureShapeLayerBlock);
+    OWSAssertDebug(configureShapeLayerBlock);
 
     [self setConfigureShapeLayerBlocks:@[ configureShapeLayerBlock ]];
 }
 
 - (void)setConfigureShapeLayerBlocks:(NSArray<ConfigureShapeLayerBlock> *)configureShapeLayerBlocks
 {
-    OWSAssert(configureShapeLayerBlocks.count > 0);
+    OWSAssertDebug(configureShapeLayerBlocks.count > 0);
 
     _configureShapeLayerBlocks = configureShapeLayerBlocks;
 
@@ -84,20 +84,19 @@ NS_ASSUME_NONNULL_BEGIN
         [layer removeFromSuperlayer];
     }
 
+    // Prevent the shape layer from animating changes.
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+
     for (ConfigureShapeLayerBlock configureShapeLayerBlock in self.configureShapeLayerBlocks) {
         CAShapeLayer *shapeLayer = [CAShapeLayer new];
         configureShapeLayerBlock(shapeLayer, self.bounds);
         [self.layer addSublayer:shapeLayer];
     }
 
+    [CATransaction commit];
+
     [self setNeedsDisplay];
-}
-
-#pragma mark - Logging
-
-+ (NSString *)tag
-{
-    return [NSString stringWithFormat:@"[%@]", self.class];
 }
 
 @end

@@ -1,12 +1,12 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSAvatarBuilder.h"
+#import <SignalServiceKit/TSThread.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
-@class OWSContactsManager;
 @class TSContactThread;
 
 @interface OWSContactAvatarBuilder : OWSAvatarBuilder
@@ -15,17 +15,17 @@ NS_ASSUME_NONNULL_BEGIN
  * Build an avatar for a Signal recipient
  */
 - (instancetype)initWithSignalId:(NSString *)signalId
-                        diameter:(NSUInteger)diameter
-                 contactsManager:(OWSContactsManager *)contactsManager;
+                       colorName:(ConversationColorName)colorName
+                        diameter:(NSUInteger)diameter;
 
 /**
  * Build an avatar for a non-Signal recipient
  */
 - (instancetype)initWithNonSignalName:(NSString *)nonSignalName
                             colorSeed:(NSString *)colorSeed
-                             diameter:(NSUInteger)diameter
-                      contactsManager:(OWSContactsManager *)contactsManager;
+                             diameter:(NSUInteger)diameter;
 
+- (instancetype)initForLocalUserWithDiameter:(NSUInteger)diameter;
 
 @end
 

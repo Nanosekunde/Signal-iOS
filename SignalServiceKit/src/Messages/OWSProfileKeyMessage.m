@@ -1,16 +1,38 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSProfileKeyMessage.h"
-#import "OWSSignalServiceProtos.pb.h"
 #import "ProfileManagerProtocol.h"
-#import "ProtoBuf+OWS.h"
-#import "TextSecureKitEnv.h"
+#import "ProtoUtils.h"
+#import "SSKEnvironment.h"
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSProfileKeyMessage
+
+- (instancetype)initWithTimestamp:(uint64_t)timestamp inThread:(nullable TSThread *)thread
+{
+    return [super initOutgoingMessageWithTimestamp:timestamp
+                                          inThread:thread
+                                       messageBody:nil
+                                     attachmentIds:[NSMutableArray new]
+                                  expiresInSeconds:0
+                                   expireStartedAt:0
+                                    isVoiceMessage:NO
+                                  groupMetaMessage:TSGroupMetaMessageUnspecified
+                                     quotedMessage:nil
+                                      contactShare:nil
+                                       linkPreview:nil
+                                    messageSticker:nil
+                                 isViewOnceMessage:NO];
+}
+
+- (nullable instancetype)initWithCoder:(NSCoder *)coder
+{
+    return [super initWithCoder:coder];
+}
 
 - (BOOL)shouldBeSaved
 {
@@ -22,22 +44,33 @@ NS_ASSUME_NONNULL_BEGIN
     return NO;
 }
 
-- (OWSSignalServiceProtosDataMessage *)buildDataMessage:(NSString *_Nullable)recipientId
+- (nullable SSKProtoDataMessage *)buildDataMessage:(NSString *_Nullable)recipientId
 {
-    OWSAssert(self.thread);
-    
-    OWSSignalServiceProtosDataMessageBuilder *builder = [self dataMessageBuilder];
-    [builder addLocalProfileKey];
-    [builder setFlags:OWSSignalServiceProtosDataMessageFlagsProfileKeyUpdate];
+    OWSAssertDebug(self.thread);
+
+    SSKProtoDataMessageBuilder *_Nullable builder = [self dataMessageBuilder];
+    if (!builder) {
+        OWSFailDebug(@"could not build protobuf.");
+        return nil;
+    }
+    [builder setTimestamp:self.timestamp];
+    [ProtoUtils addLocalProfileKeyToDataMessageBuilder:builder];
+    [builder setFlags:SSKProtoDataMessageFlagsProfileKeyUpdate];
     
     if (recipientId.length > 0) {
         // Once we've shared our profile key with a user (perhaps due to being
         // a member of a whitelisted group), make sure they're whitelisted.
-        id<ProfileManagerProtocol> profileManager = [TextSecureKitEnv sharedEnv].profileManager;
+        id<ProfileManagerProtocol> profileManager = SSKEnvironment.shared.profileManager;
         [profileManager addUserToProfileWhitelist:recipientId];
     }
 
-    return [builder build];
+    NSError *error;
+    SSKProtoDataMessage *_Nullable dataProto = [builder buildAndReturnError:&error];
+    if (error || !dataProto) {
+        OWSFailDebug(@"could not build protobuf: %@", error);
+        return nil;
+    }
+    return dataProto;
 }
 
 @end

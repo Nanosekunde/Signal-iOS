@@ -1,11 +1,13 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "ConversationScrollButton.h"
 #import "UIColor+OWS.h"
 #import "UIFont+OWS.h"
 #import "UIView+OWS.h"
+#import <SignalMessaging/SignalMessaging-Swift.h>
+#import <SignalMessaging/Theme.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -52,17 +54,13 @@ NS_ASSUME_NONNULL_BEGIN
     iconLabel.userInteractionEnabled = NO;
 
     const CGFloat circleSize = self.class.circleSize;
-    UIView *circleView = [UIView new];
+    UIView *circleView = [[OWSCircleView alloc] initWithDiameter:circleSize];
     self.circleView = circleView;
-    circleView.backgroundColor = [UIColor colorWithWhite:0.95f alpha:1.f];
     circleView.userInteractionEnabled = NO;
-    circleView.layer.cornerRadius = circleSize * 0.5f;
-    circleView.layer.shadowColor = [UIColor colorWithWhite:0.5f alpha:1.f].CGColor;
+    circleView.layer.shadowColor = Theme.middleGrayColor.CGColor;
     circleView.layer.shadowOffset = CGSizeMake(+1.f, +2.f);
     circleView.layer.shadowRadius = 1.5f;
     circleView.layer.shadowOpacity = 0.35f;
-    [circleView autoSetDimension:ALDimensionWidth toSize:circleSize];
-    [circleView autoSetDimension:ALDimensionHeight toSize:circleSize];
 
     [self addSubview:circleView];
     [self addSubview:iconLabel];
@@ -81,17 +79,25 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)updateColors
 {
+    UIColor *foregroundColor;
+    UIColor *backgroundColor;
+    if (self.hasUnreadMessages) {
+        foregroundColor = UIColor.whiteColor;
+        backgroundColor = UIColor.ows_materialBlueColor;
+    } else {
+        foregroundColor = UIColor.ows_materialBlueColor;
+        backgroundColor = Theme.scrollButtonBackgroundColor;
+    }
+
     const CGFloat circleSize = self.class.circleSize;
-    self.circleView.backgroundColor
-        = (self.hasUnreadMessages ? [UIColor ows_materialBlueColor] : [UIColor colorWithWhite:0.95f alpha:1.f]);
-    self.iconLabel.attributedText = [[NSAttributedString alloc]
-        initWithString:self.iconText
-            attributes:@{
-                NSFontAttributeName : [UIFont ows_fontAwesomeFont:circleSize * 0.8f],
-                NSForegroundColorAttributeName :
-                    (self.hasUnreadMessages ? [UIColor whiteColor] : [UIColor ows_materialBlueColor]),
-                NSBaselineOffsetAttributeName : @(-0.5f),
-            }];
+    self.circleView.backgroundColor = backgroundColor;
+    self.iconLabel.attributedText =
+        [[NSAttributedString alloc] initWithString:self.iconText
+                                        attributes:@{
+                                            NSFontAttributeName : [UIFont ows_fontAwesomeFont:circleSize * 0.8f],
+                                            NSForegroundColorAttributeName : foregroundColor,
+                                            NSBaselineOffsetAttributeName : @(-0.5f),
+                                        }];
 }
 
 @end

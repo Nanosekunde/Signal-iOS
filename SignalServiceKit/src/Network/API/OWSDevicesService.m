@@ -1,32 +1,70 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSDevicesService.h"
-#import "OWSDeleteDeviceRequest.h"
+#import "NSNotificationCenter+OWS.h"
 #import "OWSDevice.h"
 #import "OWSError.h"
-#import "OWSGetDevicesRequest.h"
+#import "OWSRequestFactory.h"
 #import "TSNetworkManager.h"
 #import <Mantle/MTLJSONAdapter.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
+NSString *const NSNotificationName_DeviceListUpdateSucceeded = @"NSNotificationName_DeviceListUpdateSucceeded";
+NSString *const NSNotificationName_DeviceListUpdateFailed = @"NSNotificationName_DeviceListUpdateFailed";
+NSString *const NSNotificationName_DeviceListUpdateModifiedDeviceList
+    = @"NSNotificationName_DeviceListUpdateModifiedDeviceList";
+
 @implementation OWSDevicesService
 
-- (void)getDevicesWithSuccess:(void (^)(NSArray<OWSDevice *> *))successCallback
++ (void)refreshDevices
+{
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        [self
+            getDevicesWithSuccess:^(NSArray<OWSDevice *> *devices) {
+                // If we have more than one device; we may have a linked device.
+                if (devices.count > 1) {
+                    // Setting this flag here shouldn't be necessary, but we do so
+                    // because the "cost" is low and it will improve robustness.
+                    [OWSDeviceManager.sharedManager setMayHaveLinkedDevices];
+                }
+
+                BOOL didAddOrRemove = [OWSDevice replaceAll:devices];
+
+                [NSNotificationCenter.defaultCenter
+                    postNotificationNameAsync:NSNotificationName_DeviceListUpdateSucceeded
+                                       object:nil];
+
+                if (didAddOrRemove) {
+                    [NSNotificationCenter.defaultCenter
+                        postNotificationNameAsync:NSNotificationName_DeviceListUpdateModifiedDeviceList
+                                           object:nil];
+                }
+            }
+            failure:^(NSError *error) {
+                OWSLogError(@"Request device list failed with error: %@", error);
+
+                [NSNotificationCenter.defaultCenter postNotificationNameAsync:NSNotificationName_DeviceListUpdateFailed
+                                                                       object:error];
+            }];
+    });
+}
+
++ (void)getDevicesWithSuccess:(void (^)(NSArray<OWSDevice *> *))successCallback
                       failure:(void (^)(NSError *))failureCallback
 {
-    OWSGetDevicesRequest *request = [OWSGetDevicesRequest new];
+    TSRequest *request = [OWSRequestFactory getDevicesRequest];
     [[TSNetworkManager sharedManager] makeRequest:request
         success:^(NSURLSessionDataTask *task, id responseObject) {
-            DDLogVerbose(@"Get devices request succeeded");
+            OWSLogVerbose(@"Get devices request succeeded");
             NSArray<OWSDevice *> *devices = [self parseResponse:responseObject];
 
             if (devices) {
                 successCallback(devices);
             } else {
-                DDLogError(@"%@ unable to parse devices response:%@", self.logTag, responseObject);
+                OWSLogError(@"unable to parse devices response:%@", responseObject);
                 NSError *error = OWSErrorMakeUnableToProcessServerResponseError();
                 failureCallback(error);
             }
@@ -35,51 +73,51 @@ NS_ASSUME_NONNULL_BEGIN
             if (!IsNSErrorNetworkFailure(error)) {
                 OWSProdError([OWSAnalyticsEvents errorGetDevicesFailed]);
             }
-            DDLogVerbose(@"Get devices request failed with error: %@", error);
+            OWSLogVerbose(@"Get devices request failed with error: %@", error);
             failureCallback(error);
         }];
 }
 
-- (void)unlinkDevice:(OWSDevice *)device
++ (void)unlinkDevice:(OWSDevice *)device
              success:(void (^)(void))successCallback
              failure:(void (^)(NSError *))failureCallback
 {
-    OWSDeleteDeviceRequest *request = [[OWSDeleteDeviceRequest alloc] initWithDevice:device];
+    TSRequest *request = [OWSRequestFactory deleteDeviceRequestWithDevice:device];
 
     [[TSNetworkManager sharedManager] makeRequest:request
         success:^(NSURLSessionDataTask *task, id responseObject) {
-            DDLogVerbose(@"Delete device request succeeded");
+            OWSLogVerbose(@"Delete device request succeeded");
             successCallback();
         }
         failure:^(NSURLSessionDataTask *task, NSError *error) {
             if (!IsNSErrorNetworkFailure(error)) {
                 OWSProdError([OWSAnalyticsEvents errorUnlinkDeviceFailed]);
             }
-            DDLogVerbose(@"Get devices request failed with error: %@", error);
+            OWSLogVerbose(@"Get devices request failed with error: %@", error);
             failureCallback(error);
         }];
 }
 
-- (NSArray<OWSDevice *> *)parseResponse:(id)responseObject
++ (NSArray<OWSDevice *> *)parseResponse:(id)responseObject
 {
     if (![responseObject isKindOfClass:[NSDictionary class]]) {
-        DDLogError(@"Device response was not a dictionary.");
+        OWSLogError(@"Device response was not a dictionary.");
         return nil;
     }
     NSDictionary *response = (NSDictionary *)responseObject;
 
     NSArray<NSDictionary *> *devicesAttributes = response[@"devices"];
     if (!devicesAttributes) {
-        DDLogError(@"Device response had no devices.");
+        OWSLogError(@"Device response had no devices.");
         return nil;
     }
 
     NSMutableArray<OWSDevice *> *devices = [NSMutableArray new];
     for (NSDictionary *deviceAttributes in devicesAttributes) {
         NSError *error;
-        OWSDevice *device = [OWSDevice deviceFromJSONDictionary:deviceAttributes error:&error];
-        if (error) {
-            DDLogError(@"Failed to build device from dictionary with error: %@", error);
+        OWSDevice *_Nullable device = [OWSDevice deviceFromJSONDictionary:deviceAttributes error:&error];
+        if (error || !device) {
+            OWSLogError(@"Failed to build device from dictionary with error: %@", error);
         } else {
             [devices addObject:device];
         }

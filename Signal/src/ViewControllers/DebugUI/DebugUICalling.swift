@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -8,15 +8,10 @@ import SignalMessaging
 
 class DebugUICalling: DebugUIPage {
 
-    let TAG = "[DebugUICalling]"
-
     // MARK: Dependencies
 
-    var notificationsAdapter: CallNotificationsAdapter {
-        return SignalApp.shared().callService.notificationsAdapter
-    }
     var messageSender: MessageSender {
-        return Environment.current().messageSender
+        return SSKEnvironment.shared.messageSender
     }
 
     // MARK: Overrides 
@@ -27,64 +22,54 @@ class DebugUICalling: DebugUIPage {
 
     override func section(thread aThread: TSThread?) -> OWSTableSection? {
         guard let thread = aThread as? TSContactThread else {
-            owsFail("Calling is only valid for contact thread, got thread: \(String(describing: aThread))")
+            owsFailDebug("Calling is only valid for contact thread, got thread: \(String(describing: aThread))")
             return nil
         }
 
         let sectionItems = [
-            OWSTableItem(title:"⚠️ Missed Call") {
-                self.delayedDispatchWithFakeCall(thread: thread) { call in
-                    self.notificationsAdapter.presentMissedCall(call, callerName: thread.name())
-                }
-            },
-            OWSTableItem(title:"⚠️ New Safety Number (rejected)") {
-                self.delayedDispatchWithFakeCall(thread: thread) { call in
-                    self.notificationsAdapter.presentMissedCallBecauseOfNewIdentity(call: call, callerName: thread.name())
-                }
-            },
-            OWSTableItem(title:"⚠️ No Longer Verified (rejected)") {
-                self.delayedDispatchWithFakeCall(thread: thread) { call in
-                    self.notificationsAdapter.presentMissedCallBecauseOfNoLongerVerifiedIdentity(call: call, callerName: thread.name())
-                }
-            },
-            OWSTableItem(title:"Send 'hangup' for old call") {
+            OWSTableItem(title: "Send 'hangup' for old call") { [weak self] in
+                guard let strongSelf = self else { return }
+
                 let kFakeCallId = UInt64(12345)
-                let hangupMessage = OWSCallHangupMessage(callId: kFakeCallId)
+                var hangupMessage: SSKProtoCallMessageHangup
+                do {
+                    let hangupBuilder = SSKProtoCallMessageHangup.builder(id: kFakeCallId)
+                    hangupMessage = try hangupBuilder.build()
+                } catch {
+                    owsFailDebug("could not build proto")
+                    return
+                }
                 let callMessage = OWSOutgoingCallMessage(thread: thread, hangupMessage: hangupMessage)
 
-                self.messageSender.sendPromise(message: callMessage).then {
-                    Logger.debug("\(self.TAG) Successfully sent hangup call message to \(thread.contactIdentifier())")
+                strongSelf.messageSender.sendPromise(message: callMessage).done {
+                    Logger.debug("Successfully sent hangup call message to \(thread.contactIdentifier())")
                 }.catch { error in
-                    Logger.error("\(self.TAG) failed to send hangup call message to \(thread.contactIdentifier()) with error: \(error)")
-                }
+                    Logger.error("failed to send hangup call message to \(thread.contactIdentifier()) with error: \(error)")
+                }.retainUntilComplete()
             },
-            OWSTableItem(title:"Send 'busy' for old call") {
+            OWSTableItem(title: "Send 'busy' for old call") { [weak self] in
+                guard let strongSelf = self else { return }
+
                 let kFakeCallId = UInt64(12345)
-                let busyMessage = OWSCallBusyMessage(callId: kFakeCallId)
+                var busyMessage: SSKProtoCallMessageBusy
+                do {
+                    let busyBuilder = SSKProtoCallMessageBusy.builder(id: kFakeCallId)
+                    busyMessage = try busyBuilder.build()
+                } catch {
+                    owsFailDebug("Couldn't build proto")
+                    return
+                }
+
                 let callMessage = OWSOutgoingCallMessage(thread: thread, busyMessage: busyMessage)
 
-                self.messageSender.sendPromise(message: callMessage).then {
-                    Logger.debug("\(self.TAG) Successfully sent busy call message to \(thread.contactIdentifier())")
+                strongSelf.messageSender.sendPromise(message: callMessage).done {
+                    Logger.debug("Successfully sent busy call message to \(thread.contactIdentifier())")
                 }.catch { error in
-                    Logger.error("\(self.TAG) failed to send busy call message to \(thread.contactIdentifier()) with error: \(error)")
-                }
+                    Logger.error("failed to send busy call message to \(thread.contactIdentifier()) with error: \(error)")
+                }.retainUntilComplete()
             }
         ]
 
-        return OWSTableSection(title: "Call Notifications (⚠️) have delay: \(kNotificationDelay)s", items: sectionItems)
-    }
-
-    // MARK: Helpers
-
-    // After enqueing the notification you may want to background the app or lock the screen before it triggers, so
-    // we give a little delay.
-    let kNotificationDelay: TimeInterval = 5
-
-    func delayedDispatchWithFakeCall(thread: TSContactThread, callBlock: @escaping (SignalCall) -> Void) {
-        let call = SignalCall.incomingCall(localId: UUID(), remotePhoneNumber: thread.contactIdentifier(), signalingId: 0)
-
-        DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + kNotificationDelay) {
-            callBlock(call)
-        }
+        return OWSTableSection(title: "Call Debug", items: sectionItems)
     }
 }

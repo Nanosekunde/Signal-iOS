@@ -1,10 +1,17 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSViewController.h"
+#import <SignalMessaging/OWSViewController.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+typedef NS_ENUM(NSUInteger, ConversationViewAction) {
+    ConversationViewActionNone,
+    ConversationViewActionCompose,
+    ConversationViewActionAudioCall,
+    ConversationViewActionVideoCall,
+};
 
 @class TSThread;
 
@@ -13,10 +20,12 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) TSThread *thread;
 
 - (void)configureForThread:(TSThread *)thread
-    keyboardOnViewAppearing:(BOOL)keyboardAppearing
-        callOnViewAppearing:(BOOL)callOnViewAppearing;
+                    action:(ConversationViewAction)action
+            focusMessageId:(nullable NSString *)focusMessageId;
 
 - (void)popKeyBoard;
+
+- (void)scrollToFirstUnreadMessage:(BOOL)isAnimated;
 
 #pragma mark 3D Touch Methods
 

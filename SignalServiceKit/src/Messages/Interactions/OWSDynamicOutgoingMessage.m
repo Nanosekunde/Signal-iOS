@@ -1,10 +1,10 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSDynamicOutgoingMessage.h"
-#import "NSDate+OWS.h"
-#import "OWSSignalServiceProtos.pb.h"
+#import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -23,11 +23,24 @@ NS_ASSUME_NONNULL_BEGIN
     return [self initWithPlainTextDataBlock:block timestamp:[NSDate ows_millisecondTimeStamp] thread:thread];
 }
 
+// MJK TODO can we remove sender timestamp?
 - (instancetype)initWithPlainTextDataBlock:(DynamicOutgoingMessageBlock)block
                                  timestamp:(uint64_t)timestamp
                                     thread:(nullable TSThread *)thread
 {
-    self = [super initWithTimestamp:timestamp inThread:thread];
+    self = [super initOutgoingMessageWithTimestamp:timestamp
+                                          inThread:thread
+                                       messageBody:nil
+                                     attachmentIds:[NSMutableArray new]
+                                  expiresInSeconds:0
+                                   expireStartedAt:0
+                                    isVoiceMessage:NO
+                                  groupMetaMessage:TSGroupMetaMessageUnspecified
+                                     quotedMessage:nil
+                                      contactShare:nil
+                                       linkPreview:nil
+                                    messageSticker:nil
+                                 isViewOnceMessage:NO];
 
     if (self) {
         _block = block;
@@ -41,10 +54,10 @@ NS_ASSUME_NONNULL_BEGIN
     return NO;
 }
 
-- (NSData *)buildPlainTextData:(SignalRecipient *)recipient
+- (nullable NSData *)buildPlainTextData:(SignalRecipient *)recipient
 {
     NSData *plainTextData = self.block(recipient);
-    OWSAssert(plainTextData);
+    OWSAssertDebug(plainTextData);
     return plainTextData;
 }
 

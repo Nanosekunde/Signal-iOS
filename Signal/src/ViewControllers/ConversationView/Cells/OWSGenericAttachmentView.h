@@ -1,18 +1,23 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
 
-@class TSAttachmentStream;
+@class ConversationStyle;
+@class TSAttachment;
 
-@interface OWSGenericAttachmentView : UIView
+@protocol ConversationViewItem;
 
-- (instancetype)initWithAttachment:(TSAttachmentStream *)attachmentStream isIncoming:(BOOL)isIncoming;
+@interface OWSGenericAttachmentView : UIStackView
 
-- (void)createContents;
+- (instancetype)initWithAttachment:(TSAttachment *)attachment
+                        isIncoming:(BOOL)isIncoming
+                          viewItem:(id<ConversationViewItem>)viewItem;
 
-+ (CGFloat)bubbleHeight;
+- (void)createContentsWithConversationStyle:(ConversationStyle *)conversationStyle;
+
+- (CGSize)measureSizeWithMaxMessageWidth:(CGFloat)maxMessageWidth;
 
 @end
 

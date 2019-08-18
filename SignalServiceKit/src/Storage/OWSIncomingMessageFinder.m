@@ -1,10 +1,10 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSIncomingMessageFinder.h"
+#import "OWSPrimaryStorage.h"
 #import "TSIncomingMessage.h"
-#import "TSStorageManager.h"
 #import <YapDatabase/YapDatabase.h>
 #import <YapDatabase/YapDatabaseSecondaryIndex.h>
 
@@ -16,48 +16,18 @@ NSString *const OWSIncomingMessageFinderColumnTimestamp = @"OWSIncomingMessageFi
 NSString *const OWSIncomingMessageFinderColumnSourceId = @"OWSIncomingMessageFinderColumnSourceId";
 NSString *const OWSIncomingMessageFinderColumnSourceDeviceId = @"OWSIncomingMessageFinderColumnSourceDeviceId";
 
-@interface OWSIncomingMessageFinder ()
-
-@property (nonatomic, readonly) TSStorageManager *storageManager;
-@property (nonatomic, readonly) YapDatabaseConnection *dbConnection;
-
-@end
-
 @implementation OWSIncomingMessageFinder
-
-@synthesize dbConnection = _dbConnection;
 
 #pragma mark - init
 
 - (instancetype)init
-{
-    OWSAssert([TSStorageManager sharedManager]);
-
-    return [self initWithStorageManager:[TSStorageManager sharedManager]];
-}
-
-- (instancetype)initWithStorageManager:(TSStorageManager *)storageManager
 {
     self = [super init];
     if (!self) {
         return self;
     }
 
-    _storageManager = storageManager;
-
     return self;
-}
-
-#pragma mark - properties
-
-- (YapDatabaseConnection *)dbConnection
-{
-    @synchronized (self) {
-        if (!_dbConnection) {
-            _dbConnection = [self.storageManager newDatabaseConnection];
-        }
-    }
-    return _dbConnection;
 }
 
 #pragma mark - YAP integration
@@ -89,24 +59,18 @@ NSString *const OWSIncomingMessageFinderColumnSourceDeviceId = @"OWSIncomingMess
 
     YapDatabaseSecondaryIndexHandler *handler = [YapDatabaseSecondaryIndexHandler withObjectBlock:block];
 
-    return [[YapDatabaseSecondaryIndex alloc] initWithSetup:setup handler:handler];
+    return [[YapDatabaseSecondaryIndex alloc] initWithSetup:setup handler:handler versionTag:nil];
 }
 
-+ (void)asyncRegisterExtensionWithStorageManager:(TSStorageManager *)storageManager
++ (NSString *)databaseExtensionName
 {
-    DDLogInfo(@"%@ registering async.", self.logTag);
-    [storageManager asyncRegisterExtension:self.indexExtension
-                                  withName:OWSIncomingMessageFinderExtensionName
-                           completionBlock:^(BOOL ready) {
-                               DDLogInfo(@"%@ finished registering async.", self.logTag);
-                           }];
+    return OWSIncomingMessageFinderExtensionName;
 }
 
-// We should not normally hit this, as we should have prefer registering async, but it is useful for testing.
-- (void)registerExtension
++ (void)asyncRegisterExtensionWithPrimaryStorage:(OWSStorage *)storage
 {
-    DDLogError(@"%@ registering SYNC. We should prefer async when possible.", self.logTag);
-    [self.storageManager registerExtension:self.class.indexExtension withName:OWSIncomingMessageFinderExtensionName];
+    OWSLogInfo(@"registering async.");
+    [storage asyncRegisterExtension:self.indexExtension withName:OWSIncomingMessageFinderExtensionName];
 }
 
 #pragma mark - instance methods
@@ -116,13 +80,6 @@ NSString *const OWSIncomingMessageFinderColumnSourceDeviceId = @"OWSIncomingMess
                     sourceDeviceId:(uint32_t)sourceDeviceId
                        transaction:(YapDatabaseReadTransaction *)transaction
 {
-    if (![self.storageManager registeredExtension:OWSIncomingMessageFinderExtensionName]) {
-        OWSFail(@"%@ in %s but extension is not registered", self.logTag, __PRETTY_FUNCTION__);
-
-        // we should be initializing this at startup rather than have an unexpectedly slow lazy setup at random.
-        [self registerExtension];
-    }
-
     NSString *queryFormat = [NSString stringWithFormat:@"WHERE %@ = ? AND %@ = ? AND %@ = ?",
                                       OWSIncomingMessageFinderColumnTimestamp,
                                       OWSIncomingMessageFinderColumnSourceId,
@@ -133,7 +90,7 @@ NSString *const OWSIncomingMessageFinderColumnSourceDeviceId = @"OWSIncomingMess
     NSUInteger count;
     BOOL success = [[transaction ext:OWSIncomingMessageFinderExtensionName] getNumberOfRows:&count matchingQuery:query];
     if (!success) {
-        OWSFail(@"%@ Could not execute query", self.logTag);
+        OWSFailDebug(@"Could not execute query");
         return NO;
     }
 

@@ -1,11 +1,11 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "ThreadViewHelper.h"
 #import <SignalServiceKit/AppContext.h>
+#import <SignalServiceKit/OWSPrimaryStorage.h>
 #import <SignalServiceKit/TSDatabaseView.h>
-#import <SignalServiceKit/TSStorageManager.h>
 #import <SignalServiceKit/TSThread.h>
 #import <YapDatabase/YapDatabase.h>
 #import <YapDatabase/YapDatabaseViewChange.h>
@@ -52,30 +52,34 @@ NS_ASSUME_NONNULL_BEGIN
         [[YapDatabaseViewMappings alloc] initWithGroups:@[ grouping ] view:TSThreadDatabaseViewExtensionName];
     [self.threadMappings setIsReversed:YES forGroup:grouping];
 
-    self.uiDatabaseConnection = [TSStorageManager.sharedManager newDatabaseConnection];
+    self.uiDatabaseConnection = [OWSPrimaryStorage.sharedManager newDatabaseConnection];
     [self.uiDatabaseConnection beginLongLivedReadTransaction];
 
     [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(applicationWillEnterForeground:)
-                                                 name:UIApplicationWillEnterForegroundNotification
+                                             selector:@selector(applicationDidBecomeActive:)
+                                                 name:OWSApplicationDidBecomeActiveNotification
                                                object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(applicationDidEnterBackground:)
-                                                 name:UIApplicationDidEnterBackgroundNotification
+                                             selector:@selector(applicationWillResignActive:)
+                                                 name:OWSApplicationWillResignActiveNotification
                                                object:nil];
 
-    self.shouldObserveDBModifications
-        = !(CurrentAppContext().isMainApp && CurrentAppContext().mainApplicationState == UIApplicationStateBackground);
+    [self updateShouldObserveDBModifications];
 }
 
-- (void)applicationWillEnterForeground:(NSNotification *)notification
+- (void)applicationDidBecomeActive:(NSNotification *)notification
 {
-    self.shouldObserveDBModifications = YES;
+    [self updateShouldObserveDBModifications];
 }
 
-- (void)applicationDidEnterBackground:(NSNotification *)notification
+- (void)applicationWillResignActive:(NSNotification *)notification
 {
-    self.shouldObserveDBModifications = NO;
+    [self updateShouldObserveDBModifications];
+}
+
+- (void)updateShouldObserveDBModifications
+{
+    self.shouldObserveDBModifications = CurrentAppContext().isAppForegroundAndActive;
 }
 
 // Don't observe database change notifications when the app is in the background.
@@ -100,13 +104,15 @@ NS_ASSUME_NONNULL_BEGIN
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(yapDatabaseModified:)
                                                      name:YapDatabaseModifiedNotification
-                                                   object:nil];
+                                                   object:OWSPrimaryStorage.sharedManager.dbNotificationObject];
         [[NSNotificationCenter defaultCenter] addObserver:self
                                                  selector:@selector(yapDatabaseModifiedExternally:)
                                                      name:YapDatabaseModifiedExternallyNotification
                                                    object:nil];
     } else {
-        [[NSNotificationCenter defaultCenter] removeObserver:self name:YapDatabaseModifiedNotification object:nil];
+        [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                        name:YapDatabaseModifiedNotification
+                                                      object:OWSPrimaryStorage.sharedManager.dbNotificationObject];
         [[NSNotificationCenter defaultCenter] removeObserver:self
                                                         name:YapDatabaseModifiedExternallyNotification
                                                       object:nil];
@@ -126,25 +132,30 @@ NS_ASSUME_NONNULL_BEGIN
 {
     OWSAssertIsOnMainThread();
 
-    DDLogVerbose(@"%@ %s", self.logTag, __PRETTY_FUNCTION__);
+    OWSLogVerbose(@"");
 
-    // External database modifications can't be converted into incremental updates,
-    // so rebuild everything.  This is expensive and usually isn't necessary, but
-    // there's no alternative.
-    [self.uiDatabaseConnection beginLongLivedReadTransaction];
-    [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
-        [self.threadMappings updateWithTransaction:transaction];
-    }];
-
-    [self updateThreads];
-    [self.delegate threadListDidChange];
+    if (self.shouldObserveDBModifications) {
+        // External database modifications can't be converted into incremental updates,
+        // so rebuild everything.  This is expensive and usually isn't necessary, but
+        // there's no alternative.
+        //
+        // We don't need to do this if we're not observing db modifications since we'll
+        // do it when we resume.
+        [self.uiDatabaseConnection beginLongLivedReadTransaction];
+        [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
+            [self.threadMappings updateWithTransaction:transaction];
+        }];
+        
+        [self updateThreads];
+        [self.delegate threadListDidChange];
+    }
 }
 
 - (void)yapDatabaseModified:(NSNotification *)notification
 {
     OWSAssertIsOnMainThread();
 
-    DDLogVerbose(@"%@ %s", self.logTag, __PRETTY_FUNCTION__);
+    OWSLogVerbose(@"");
 
     NSArray *notifications = [self.uiDatabaseConnection beginLongLivedReadTransaction];
 
@@ -180,7 +191,7 @@ NS_ASSUME_NONNULL_BEGIN
     NSMutableArray<TSThread *> *threads = [NSMutableArray new];
     [self.uiDatabaseConnection readWithBlock:^(YapDatabaseReadTransaction *transaction) {
         NSUInteger numberOfSections = [self.threadMappings numberOfSections];
-        OWSAssert(numberOfSections == 1);
+        OWSAssertDebug(numberOfSections == 1);
         for (NSUInteger section = 0; section < numberOfSections; section++) {
             NSUInteger numberOfItems = [self.threadMappings numberOfItemsInSection:section];
             for (NSUInteger item = 0; item < numberOfItems; item++) {

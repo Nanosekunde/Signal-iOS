@@ -1,14 +1,13 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSDeviceProvisioner.h"
 #import "OWSDeviceProvisioningCodeService.h"
 #import "OWSDeviceProvisioningService.h"
 #import "OWSFakeNetworkManager.h"
+#import "SSKBaseTestObjC.h"
 #import "TSNetworkManager.h"
-
-#import <XCTest/XCTest.h>
 
 @interface OWSFakeDeviceProvisioningService : OWSDeviceProvisioningService
 
@@ -18,10 +17,10 @@
 
 - (void)provisionWithMessageBody:(NSData *)messageBody
                ephemeralDeviceId:(NSString *)deviceId
-                         success:(void (^)())successCallback
+                         success:(void (^)(void))successCallback
                          failure:(void (^)(NSError *))failureCallback
 {
-    NSLog(@"faking successful provisioning");
+    OWSLogInfo(@"faking successful provisioning");
     successCallback();
 }
 
@@ -36,7 +35,7 @@
 - (void)requestProvisioningCodeWithSuccess:(void (^)(NSString *))successCallback
                                    failure:(void (^)(NSError *))failureCallback
 {
-    NSLog(@"faking successful provisioning code fetching");
+    OWSLogInfo(@"faking successful provisioning code fetching");
     successCallback(@"fake-provisioning-code");
 }
 
@@ -49,7 +48,7 @@
 
 @end
 
-@interface OWSDeviceProvisionerTest : XCTestCase
+@interface OWSDeviceProvisionerTest : SSKBaseTestObjC
 
 @end
 
@@ -69,6 +68,7 @@
     NSString *theirEphemeralDeviceId;
 
     OWSFakeNetworkManager *networkManager = [OWSFakeNetworkManager new];
+
     OWSDeviceProvisioner *provisioner = [[OWSDeviceProvisioner alloc]
             initWithMyPublicKey:myPublicKey
                    myPrivateKey:myPrivateKey
@@ -76,6 +76,7 @@
          theirEphemeralDeviceId:theirEphemeralDeviceId
               accountIdentifier:accountIdentifier
                      profileKey:profileKey
+            readReceiptsEnabled:YES
         provisioningCodeService:[[OWSFakeDeviceProvisioningCodeService alloc] initWithNetworkManager:networkManager]
             provisioningService:[[OWSFakeDeviceProvisioningService alloc] initWithNetworkManager:networkManager]];
 
@@ -89,7 +90,7 @@
     [self waitForExpectationsWithTimeout:5.0
                                  handler:^(NSError *error) {
                                      if (error) {
-                                         NSLog(@"Timeout Error: %@", error);
+                                         OWSLogInfo(@"Timeout Error: %@", error);
                                      }
                                  }];
 }

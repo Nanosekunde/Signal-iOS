@@ -1,33 +1,30 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "NSAttributedString+OWS.h"
 #import "UIView+OWS.h"
+#import <SignalServiceKit/AppContext.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @implementation NSAttributedString (OWS)
 
-- (NSAttributedString *)rtlSafeAppend:(NSString *)text
-                           attributes:(NSDictionary *)attributes
-                        referenceView:(UIView *)referenceView
+- (NSAttributedString *)rtlSafeAppend:(NSString *)text attributes:(NSDictionary *)attributes
 {
-    OWSAssert(text);
-    OWSAssert(attributes);
-    OWSAssert(referenceView);
+    OWSAssertDebug(text);
+    OWSAssertDebug(attributes);
 
     NSAttributedString *substring = [[NSAttributedString alloc] initWithString:text attributes:attributes];
-    return [self rtlSafeAppend:substring referenceView:referenceView];
+    return [self rtlSafeAppend:substring];
 }
 
-- (NSAttributedString *)rtlSafeAppend:(NSAttributedString *)string referenceView:(UIView *)referenceView
+- (NSAttributedString *)rtlSafeAppend:(NSAttributedString *)string
 {
-    OWSAssert(string);
-    OWSAssert(referenceView);
+    OWSAssertDebug(string);
 
     NSMutableAttributedString *result = [NSMutableAttributedString new];
-    if ([referenceView isRTL]) {
+    if (CurrentAppContext().isRTL) {
         [result appendAttributedString:string];
         [result appendAttributedString:self];
     } else {

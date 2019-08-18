@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSDispatch.h"
@@ -18,16 +18,6 @@ NS_ASSUME_NONNULL_BEGIN
     return queue;
 }
 
-+ (dispatch_queue_t)sessionStoreQueue
-{
-    static dispatch_once_t onceToken;
-    static dispatch_queue_t queue;
-    dispatch_once(&onceToken, ^{
-        queue = dispatch_queue_create("org.whispersystems.signal.sessionStoreQueue", NULL);
-    });
-    return queue;
-}
-
 + (dispatch_queue_t)sendingQueue
 {
     static dispatch_once_t onceToken;
@@ -39,9 +29,5 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 @end
-
-void AssertIsOnMainThread() {
-    OWSCAssert([NSThread isMainThread]);
-}
 
 NS_ASSUME_NONNULL_END

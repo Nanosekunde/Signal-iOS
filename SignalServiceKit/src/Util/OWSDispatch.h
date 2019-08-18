@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
@@ -12,22 +12,10 @@ NS_ASSUME_NONNULL_BEGIN
 + (dispatch_queue_t)attachmentsQueue;
 
 /**
- * Signal protocol session state must be coordinated on a serial queue. This is sometimes used synchronously,
- * so never dispatching sync *from* this queue to avoid deadlock.
- */
-+ (dispatch_queue_t)sessionStoreQueue;
-
-/**
  * Serial message sending queue
  */
 + (dispatch_queue_t)sendingQueue;
 
 @end
-
-// This macro is intended for use in Objective-C.
-#define OWSAssertIsOnMainThread() OWSCAssert([NSThread isMainThread])
-
-// This function is intended for use in Swift.
-void AssertIsOnMainThread(void);
 
 NS_ASSUME_NONNULL_END

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -18,19 +18,36 @@ import SignalMessaging
 @available(iOS 10.0, *)
 final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
 
-    let TAG = "[CallKitCallUIAdaptee]"
-
     private let callManager: CallKitCallManager
     internal let callService: CallService
-    internal let notificationsAdapter: CallNotificationsAdapter
+    internal let notificationPresenter: NotificationPresenter
     internal let contactsManager: OWSContactsManager
+    private let showNamesOnCallScreen: Bool
     private let provider: CXProvider
+    private let audioActivity: AudioActivity
 
     // CallKit handles incoming ringer stop/start for us. Yay!
     let hasManualRinger = false
 
+    // Instantiating more than one CXProvider can cause us to miss call transactions, so
+    // we maintain the provider across Adaptees using a singleton pattern
+    private static var _sharedProvider: CXProvider?
+    class func sharedProvider(useSystemCallLog: Bool) -> CXProvider {
+        let configuration = buildProviderConfiguration(useSystemCallLog: useSystemCallLog)
+
+        if let sharedProvider = self._sharedProvider {
+            sharedProvider.configuration = configuration
+            return sharedProvider
+        } else {
+            SwiftSingletons.register(self)
+            let provider = CXProvider(configuration: configuration)
+            _sharedProvider = provider
+            return provider
+        }
+    }
+
     // The app's provider configuration, representing its CallKit capabilities
-    static var providerConfiguration: CXProviderConfiguration {
+    class func buildProviderConfiguration(useSystemCallLog: Bool) -> CXProviderConfiguration {
         let localizedName = NSLocalizedString("APPLICATION_NAME", comment: "Name of application")
         let providerConfiguration = CXProviderConfiguration(localizedName: localizedName)
 
@@ -43,38 +60,60 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
         providerConfiguration.supportedHandleTypes = [.phoneNumber, .generic]
 
         let iconMaskImage = #imageLiteral(resourceName: "logoSignal")
-        providerConfiguration.iconTemplateImageData = UIImagePNGRepresentation(iconMaskImage)
+        providerConfiguration.iconTemplateImageData = iconMaskImage.pngData()
 
-        providerConfiguration.ringtoneSound = "r.caf"
+        // We don't set the ringtoneSound property, so that we use either the
+        // default iOS ringtone OR the custom ringtone associated with this user's
+        // system contact, if possible (iOS 11 or later).
+
+        if #available(iOS 11.0, *) {
+            providerConfiguration.includesCallsInRecents = useSystemCallLog
+        } else {
+            // not configurable for iOS10+
+            assert(useSystemCallLog)
+        }
 
         return providerConfiguration
     }
 
-    init(callService: CallService, contactsManager: OWSContactsManager, notificationsAdapter: CallNotificationsAdapter) {
+    init(callService: CallService, contactsManager: OWSContactsManager, notificationPresenter: NotificationPresenter, showNamesOnCallScreen: Bool, useSystemCallLog: Bool) {
         AssertIsOnMainThread()
 
-        Logger.debug("\(self.TAG) \(#function)")
+        Logger.debug("")
 
-        self.callManager = CallKitCallManager()
+        self.callManager = CallKitCallManager(showNamesOnCallScreen: showNamesOnCallScreen)
         self.callService = callService
         self.contactsManager = contactsManager
-        self.notificationsAdapter = notificationsAdapter
-        self.provider = CXProvider(configuration: type(of: self).providerConfiguration)
+        self.notificationPresenter = notificationPresenter
+
+        self.provider = type(of: self).sharedProvider(useSystemCallLog: useSystemCallLog)
+
+        self.audioActivity = AudioActivity(audioDescription: "[CallKitCallUIAdaptee]", behavior: .call)
+        self.showNamesOnCallScreen = showNamesOnCallScreen
 
         super.init()
 
-        SwiftSingletons.register(self)
+        // We cannot assert singleton here, because this class gets rebuilt when the user changes relevant call settings
 
         self.provider.setDelegate(self, queue: nil)
+    }
+
+    // MARK: Dependencies
+
+    var audioSession: OWSAudioSession {
+        return Environment.shared.audioSession
     }
 
     // MARK: CallUIAdaptee
 
     func startOutgoingCall(handle: String) -> SignalCall {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
         let call = SignalCall.outgoingCall(localId: UUID(), remotePhoneNumber: handle)
+
+        // make sure we don't terminate audio session during call
+        _ = self.audioSession.startAudioActivity(call.audioActivity)
 
         // Add the new outgoing call to the app's list of calls.
         // So we can find it in the provider delegate callbacks.
@@ -87,7 +126,7 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
     // Called from CallService after call has ended to clean up any remaining CallKit call state.
     func failCall(_ call: SignalCall, error: CallError) {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
         switch error {
         case .timeout(description: _):
@@ -101,18 +140,19 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
 
     func reportIncomingCall(_ call: SignalCall, callerName: String) {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
         // Construct a CXCallUpdate describing the incoming call, including the caller.
         let update = CXCallUpdate()
-        if Environment.current().preferences.isCallKitPrivacyEnabled() {
-            let callKitId = CallKitCallManager.kAnonymousCallHandlePrefix + call.localId.uuidString
-            update.remoteHandle = CXHandle(type: .generic, value: callKitId)
-            TSStorageManager.shared().setPhoneNumber(call.remotePhoneNumber, forCallKitId:callKitId)
-            update.localizedCallerName = NSLocalizedString("CALLKIT_ANONYMOUS_CONTACT_NAME", comment: "The generic name used for calls if CallKit privacy is enabled")
-        } else {
+
+        if showNamesOnCallScreen {
             update.localizedCallerName = self.contactsManager.stringForConversationTitle(withPhoneIdentifier: call.remotePhoneNumber)
             update.remoteHandle = CXHandle(type: .phoneNumber, value: call.remotePhoneNumber)
+        } else {
+            let callKitId = CallKitCallManager.kAnonymousCallHandlePrefix + call.localId.uuidString
+            update.remoteHandle = CXHandle(type: .generic, value: callKitId)
+            OWSPrimaryStorage.shared().setPhoneNumber(call.remotePhoneNumber, forCallKitId: callKitId)
+            update.localizedCallerName = NSLocalizedString("CALLKIT_ANONYMOUS_CONTACT_NAME", comment: "The generic name used for calls if CallKit privacy is enabled")
         }
 
         update.hasVideo = call.hasLocalVideo
@@ -126,7 +166,7 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
              since calls may be "denied" for various legitimate reasons. See CXErrorCodeIncomingCallError.
              */
             guard error == nil else {
-                Logger.error("\(self.TAG) failed to report new incoming call")
+                Logger.error("failed to report new incoming call")
                 return
             }
 
@@ -136,14 +176,14 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
 
     func answerCall(localId: UUID) {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
-        owsFail("\(self.TAG) \(#function) CallKit should answer calls via system call screen, not via notifications.")
+        owsFailDebug("CallKit should answer calls via system call screen, not via notifications.")
     }
 
     func answerCall(_ call: SignalCall) {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
         callManager.answer(call: call)
     }
@@ -151,19 +191,19 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
     func declineCall(localId: UUID) {
         AssertIsOnMainThread()
 
-        owsFail("\(self.TAG) \(#function) CallKit should decline calls via system call screen, not via notifications.")
+        owsFailDebug("CallKit should decline calls via system call screen, not via notifications.")
     }
 
     func declineCall(_ call: SignalCall) {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
         callManager.localHangup(call: call)
     }
 
     func recipientAcceptedCall(_ call: SignalCall) {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
         self.provider.reportOutgoingCall(with: call.localId, connectedAt: nil)
 
@@ -175,35 +215,35 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
 
     func localHangupCall(_ call: SignalCall) {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
         callManager.localHangup(call: call)
     }
 
     func remoteDidHangupCall(_ call: SignalCall) {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
         provider.reportCall(with: call.localId, endedAt: nil, reason: CXCallEndedReason.remoteEnded)
     }
 
     func remoteBusy(_ call: SignalCall) {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
         provider.reportCall(with: call.localId, endedAt: nil, reason: CXCallEndedReason.unanswered)
     }
 
     func setIsMuted(call: SignalCall, isMuted: Bool) {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
         callManager.setIsMuted(call: call, isMuted: isMuted)
     }
 
     func setHasLocalVideo(call: SignalCall, hasLocalVideo: Bool) {
         AssertIsOnMainThread()
-        Logger.debug("\(self.TAG) \(#function)")
+        Logger.debug("")
 
         let update = CXCallUpdate()
         update.hasVideo = hasLocalVideo
@@ -218,7 +258,7 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
 
     func providerDidReset(_ provider: CXProvider) {
         AssertIsOnMainThread()
-        Logger.info("\(self.TAG) \(#function)")
+        Logger.info("")
 
         // End any ongoing calls if the provider resets, and remove them from the app's list of calls,
         // since they are no longer valid.
@@ -231,24 +271,24 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
     func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
         AssertIsOnMainThread()
 
-        Logger.info("\(TAG) in \(#function) CXStartCallAction")
+        Logger.info("CXStartCallAction")
 
         guard let call = callManager.callWithLocalId(action.callUUID) else {
-            Logger.error("\(TAG) unable to find call in \(#function)")
+            Logger.error("unable to find call")
             return
         }
 
         // We can't wait for long before fulfilling the CXAction, else CallKit will show a "Failed Call". We don't 
         // actually need to wait for the outcome of the handleOutgoingCall promise, because it handles any errors by 
         // manually failing the call.
-        let callPromise = self.callService.handleOutgoingCall(call)
-        callPromise.retainUntilComplete()
+        self.callService.handleOutgoingCall(call).retainUntilComplete()
 
         action.fulfill()
         self.provider.reportOutgoingCall(with: call.localId, startedConnectingAt: nil)
 
-        if Environment.current().preferences.isCallKitPrivacyEnabled() {
-            // Update the name used in the CallKit UI for outgoing calls.
+        // Update the name used in the CallKit UI for outgoing calls when the user prefers not to show names
+        // in ther notifications
+        if !showNamesOnCallScreen {
             let update = CXCallUpdate()
             update.localizedCallerName = NSLocalizedString("CALLKIT_ANONYMOUS_CONTACT_NAME",
                                                            comment: "The generic name used for calls if CallKit privacy is enabled")
@@ -259,7 +299,7 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
     func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
         AssertIsOnMainThread()
 
-        Logger.info("\(TAG) Received \(#function) CXAnswerCallAction")
+        Logger.info("Received \(#function) CXAnswerCallAction")
         // Retrieve the instance corresponding to the action's call UUID
         guard let call = callManager.callWithLocalId(action.callUUID) else {
             action.fail()
@@ -274,9 +314,9 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
     public func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
         AssertIsOnMainThread()
 
-        Logger.info("\(TAG) Received \(#function) CXEndCallAction")
+        Logger.info("Received \(#function) CXEndCallAction")
         guard let call = callManager.callWithLocalId(action.callUUID) else {
-            Logger.error("\(self.TAG) in \(#function) trying to end unknown call with localId: \(action.callUUID)")
+            Logger.error("trying to end unknown call with localId: \(action.callUUID)")
             action.fail()
             return
         }
@@ -293,7 +333,7 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
     public func provider(_ provider: CXProvider, perform action: CXSetHeldCallAction) {
         AssertIsOnMainThread()
 
-        Logger.info("\(TAG) Received \(#function) CXSetHeldCallAction")
+        Logger.info("Received \(#function) CXSetHeldCallAction")
         guard let call = callManager.callWithLocalId(action.callUUID) else {
             action.fail()
             return
@@ -309,9 +349,9 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
     public func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
         AssertIsOnMainThread()
 
-        Logger.info("\(TAG) Received \(#function) CXSetMutedCallAction")
+        Logger.info("Received \(#function) CXSetMutedCallAction")
         guard let call = callManager.callWithLocalId(action.callUUID) else {
-            Logger.error("\(TAG) Failing CXSetMutedCallAction for unknown call: \(action.callUUID)")
+            Logger.error("Failing CXSetMutedCallAction for unknown call: \(action.callUUID)")
             action.fail()
             return
         }
@@ -323,19 +363,19 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
     public func provider(_ provider: CXProvider, perform action: CXSetGroupCallAction) {
         AssertIsOnMainThread()
 
-        Logger.warn("\(TAG) unimplemented \(#function) for CXSetGroupCallAction")
+        Logger.warn("unimplemented \(#function) for CXSetGroupCallAction")
     }
 
     public func provider(_ provider: CXProvider, perform action: CXPlayDTMFCallAction) {
         AssertIsOnMainThread()
 
-        Logger.warn("\(TAG) unimplemented \(#function) for CXPlayDTMFCallAction")
+        Logger.warn("unimplemented \(#function) for CXPlayDTMFCallAction")
     }
 
     func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
         AssertIsOnMainThread()
 
-        owsFail("\(TAG) Timed out \(#function) while performing \(action)")
+        owsFailDebug("Timed out while performing \(action)")
 
         // React to the action timeout if necessary, such as showing an error UI.
     }
@@ -343,16 +383,18 @@ final class CallKitCallUIAdaptee: NSObject, CallUIAdaptee, CXProviderDelegate {
     func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
         AssertIsOnMainThread()
 
-        Logger.debug("\(TAG) Received \(#function)")
+        Logger.debug("Received")
 
-        CallAudioSession.shared.isRTCAudioEnabled = true
+        _ = self.audioSession.startAudioActivity(self.audioActivity)
+        self.audioSession.isRTCAudioEnabled = true
     }
 
     func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
         AssertIsOnMainThread()
 
-        Logger.debug("\(TAG) Received \(#function)")
-        CallAudioSession.shared.isRTCAudioEnabled = false
+        Logger.debug("Received")
+        self.audioSession.isRTCAudioEnabled = false
+        self.audioSession.endAudioActivity(self.audioActivity)
     }
 
     // MARK: - Util

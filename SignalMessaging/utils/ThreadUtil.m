@@ -1,20 +1,23 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "ThreadUtil.h"
-#import "OWSContactOffersInteraction.h"
 #import "OWSContactsManager.h"
-#import "TSUnreadIndicatorInteraction.h"
+#import "OWSQuotedReplyModel.h"
+#import "OWSUnreadIndicator.h"
+#import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalCoreKit/SignalCoreKit-Swift.h>
 #import <SignalMessaging/OWSProfileManager.h>
 #import <SignalMessaging/SignalMessaging-Swift.h>
-#import <SignalServiceKit/NSDate+OWS.h>
 #import <SignalServiceKit/OWSAddToContactsOfferMessage.h>
 #import <SignalServiceKit/OWSAddToProfileWhitelistOfferMessage.h>
 #import <SignalServiceKit/OWSBlockingManager.h>
+#import <SignalServiceKit/OWSContactOffersInteraction.h>
 #import <SignalServiceKit/OWSDisappearingMessagesConfiguration.h>
 #import <SignalServiceKit/OWSMessageSender.h>
 #import <SignalServiceKit/OWSUnknownContactBlockOfferMessage.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/TSAccountManager.h>
 #import <SignalServiceKit/TSCall.h>
 #import <SignalServiceKit/TSContactThread.h>
@@ -23,16 +26,15 @@
 #import <SignalServiceKit/TSInvalidIdentityKeyErrorMessage.h>
 #import <SignalServiceKit/TSOutgoingMessage.h>
 #import <SignalServiceKit/TSThread.h>
+#import <SignalServiceKit/TSUnreadIndicatorInteraction.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @interface ThreadDynamicInteractions ()
 
-@property (nonatomic, nullable) NSNumber *unreadIndicatorPosition;
+@property (nonatomic, nullable) NSNumber *focusMessagePosition;
 
-@property (nonatomic, nullable) NSNumber *firstUnseenInteractionTimestamp;
-
-@property (nonatomic) BOOL hasMoreUnseenMessages;
+@property (nonatomic, nullable) OWSUnreadIndicator *unreadIndicator;
 
 @end
 
@@ -42,526 +44,692 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)clearUnreadIndicatorState
 {
-    self.unreadIndicatorPosition = nil;
-    self.firstUnseenInteractionTimestamp = nil;
-    self.hasMoreUnseenMessages = NO;
+    self.unreadIndicator = nil;
+}
+
+- (BOOL)isEqual:(id)object
+{
+    if (self == object) {
+        return YES;
+    }
+
+    if (![object isKindOfClass:[ThreadDynamicInteractions class]]) {
+        return NO;
+    }
+
+    ThreadDynamicInteractions *other = (ThreadDynamicInteractions *)object;
+    return ([NSObject isNullableObject:self.focusMessagePosition equalTo:other.focusMessagePosition] &&
+        [NSObject isNullableObject:self.unreadIndicator equalTo:other.unreadIndicator]);
 }
 
 @end
 
 #pragma mark -
 
+typedef void (^BuildOutgoingMessageCompletionBlock)(TSOutgoingMessage *savedMessage,
+    NSMutableArray<OWSOutgoingAttachmentInfo *> *attachmentInfos,
+    SDSAnyWriteTransaction *writeTransaction);
+
 @implementation ThreadUtil
 
-+ (TSOutgoingMessage *)sendMessageWithText:(NSString *)text
-                                  inThread:(TSThread *)thread
-                             messageSender:(OWSMessageSender *)messageSender
+#pragma mark - Dependencies
+
++ (MessageSenderJobQueue *)messageSenderJobQueue
 {
-    return [self sendMessageWithText:text
-        inThread:thread
-        messageSender:messageSender
-        success:^{
-            DDLogInfo(@"%@ Successfully sent message.", self.logTag);
-        }
-        failure:^(NSError *error) {
-            DDLogWarn(@"%@ Failed to deliver message with error: %@", self.logTag, error);
-        }];
+    return SSKEnvironment.shared.messageSenderJobQueue;
 }
 
++ (YapDatabaseConnection *)dbConnection
+{
+    return SSKEnvironment.shared.primaryStorage.dbReadWriteConnection;
+}
 
-+ (TSOutgoingMessage *)sendMessageWithText:(NSString *)text
-                                  inThread:(TSThread *)thread
-                             messageSender:(OWSMessageSender *)messageSender
-                                   success:(void (^)(void))successHandler
-                                   failure:(void (^)(NSError *error))failureHandler
++ (SDSDatabaseStorage *)databaseStorage
+{
+    return SSKEnvironment.shared.databaseStorage;
+}
+
+#pragma mark - Durable Message Enqueue
+
++ (TSOutgoingMessage *)enqueueMessageWithText:(NSString *)fullMessageText
+                                     inThread:(TSThread *)thread
+                             quotedReplyModel:(nullable OWSQuotedReplyModel *)quotedReplyModel
+                             linkPreviewDraft:(nullable nullable OWSLinkPreviewDraft *)linkPreviewDraft
+                                  transaction:(SDSAnyReadTransaction *)transaction
+{
+    return [self enqueueMessageWithText:fullMessageText
+                       mediaAttachments:@[]
+                               inThread:thread
+                       quotedReplyModel:quotedReplyModel
+                       linkPreviewDraft:linkPreviewDraft
+                            transaction:transaction];
+}
+
++ (TSOutgoingMessage *)enqueueMessageWithText:(nullable NSString *)fullMessageText
+                             mediaAttachments:(NSArray<SignalAttachment *> *)mediaAttachments
+                                     inThread:(TSThread *)thread
+                             quotedReplyModel:(nullable OWSQuotedReplyModel *)quotedReplyModel
+                             linkPreviewDraft:(nullable nullable OWSLinkPreviewDraft *)linkPreviewDraft
+                                  transaction:(SDSAnyReadTransaction *)transaction
 {
     OWSAssertIsOnMainThread();
-    OWSAssert(text.length > 0);
-    OWSAssert(thread);
-    OWSAssert(messageSender);
+    OWSAssertDebug(thread);
 
-    OWSDisappearingMessagesConfiguration *configuration =
-        [OWSDisappearingMessagesConfiguration fetchObjectWithUniqueID:thread.uniqueId];
-    TSOutgoingMessage *message =
-        [[TSOutgoingMessage alloc] initWithTimestamp:[NSDate ows_millisecondTimeStamp]
-                                            inThread:thread
-                                         messageBody:text
-                                       attachmentIds:[NSMutableArray new]
-                                    expiresInSeconds:(configuration.isEnabled ? configuration.durationSeconds : 0)];
-
-    [messageSender enqueueMessage:message success:successHandler failure:failureHandler];
-
-    return message;
+    return [self
+        buildOutgoingMessageWithText:fullMessageText
+                    mediaAttachments:mediaAttachments
+                              thread:thread
+                    quotedReplyModel:quotedReplyModel
+                    linkPreviewDraft:linkPreviewDraft
+                         transaction:transaction
+                          completion:^(TSOutgoingMessage *savedMessage,
+                              NSMutableArray<OWSOutgoingAttachmentInfo *> *attachmentInfos,
+                              SDSAnyWriteTransaction *writeTransaction) {
+                              if (attachmentInfos.count == 0) {
+                                  [self.messageSenderJobQueue addMessage:savedMessage transaction:writeTransaction];
+                              } else {
+                                  [self.messageSenderJobQueue addMediaMessage:savedMessage
+                                                              attachmentInfos:attachmentInfos
+                                                        isTemporaryAttachment:NO];
+                              }
+                          }];
 }
 
-+ (TSOutgoingMessage *)sendMessageWithAttachment:(SignalAttachment *)attachment
-                                        inThread:(TSThread *)thread
-                                   messageSender:(OWSMessageSender *)messageSender
-                                      completion:(void (^_Nullable)(NSError *_Nullable error))completion
++ (TSOutgoingMessage *)buildOutgoingMessageWithText:(nullable NSString *)fullMessageText
+                                   mediaAttachments:(NSArray<SignalAttachment *> *)mediaAttachments
+                                             thread:(TSThread *)thread
+                                   quotedReplyModel:(nullable OWSQuotedReplyModel *)quotedReplyModel
+                                   linkPreviewDraft:(nullable OWSLinkPreviewDraft *)linkPreviewDraft
+                                        transaction:(SDSAnyReadTransaction *)transaction
+                                         completion:(BuildOutgoingMessageCompletionBlock)completionBlock
 {
-    return [self sendMessageWithAttachment:attachment
-                                  inThread:thread
-                             messageSender:messageSender
-                              ignoreErrors:NO
-                                completion:completion];
-}
+    NSString *_Nullable truncatedText;
+    NSArray<SignalAttachment *> *attachments = mediaAttachments;
+    if ([fullMessageText lengthOfBytesUsingEncoding:NSUTF8StringEncoding] <= kOversizeTextMessageSizeThreshold) {
+        truncatedText = fullMessageText;
+    } else {
+        truncatedText = [fullMessageText ows_truncatedToByteCount:kOversizeTextMessageSizeThreshold];
 
-+ (TSOutgoingMessage *)sendMessageWithAttachment:(SignalAttachment *)attachment
-                                        inThread:(TSThread *)thread
-                                   messageSender:(OWSMessageSender *)messageSender
-                                    ignoreErrors:(BOOL)ignoreErrors
-                                      completion:(void (^_Nullable)(NSError *_Nullable error))completion
-{
-    OWSAssertIsOnMainThread();
-    OWSAssert(attachment);
-    OWSAssert(ignoreErrors || ![attachment hasError]);
-    OWSAssert([attachment mimeType].length > 0);
-    OWSAssert(thread);
-    OWSAssert(messageSender);
-
-    OWSDisappearingMessagesConfiguration *configuration =
-        [OWSDisappearingMessagesConfiguration fetchObjectWithUniqueID:thread.uniqueId];
-    TSOutgoingMessage *message =
-        [[TSOutgoingMessage alloc] initWithTimestamp:[NSDate ows_millisecondTimeStamp]
-                                            inThread:thread
-                                         messageBody:attachment.captionText
-                                      isVoiceMessage:[attachment isVoiceMessage]
-                                    expiresInSeconds:(configuration.isEnabled ? configuration.durationSeconds : 0)];
-    
-    [messageSender enqueueAttachment:attachment.dataSource
-        contentType:attachment.mimeType
-        sourceFilename:attachment.filenameOrDefault
-        inMessage:message
-        success:^{
-            DDLogDebug(@"%@ Successfully sent message attachment.", self.logTag);
-            if (completion) {
-                dispatch_async(dispatch_get_main_queue(), ^(void) {
-                    completion(nil);
-                });
-            }
+        DataSource *_Nullable dataSource = [DataSourceValue dataSourceWithOversizeText:fullMessageText];
+        if (dataSource) {
+            SignalAttachment *oversizeTextAttachment =
+                [SignalAttachment attachmentWithDataSource:dataSource dataUTI:kOversizeTextAttachmentUTI];
+            attachments = [mediaAttachments arrayByAddingObject:oversizeTextAttachment];
+        } else {
+            OWSFailDebug(@"dataSource was unexpectedly nil");
         }
-        failure:^(NSError *error) {
-            DDLogError(@"%@ Failed to send message attachment with error: %@", self.logTag, error);
-            if (completion) {
-                dispatch_async(dispatch_get_main_queue(), ^(void) {
-                    completion(error);
-                });
-            }
-        }];
+    }
 
-    return message;
-}
+    OWSDisappearingMessagesConfiguration *configuration =
+        [OWSDisappearingMessagesConfiguration anyFetchWithUniqueId:thread.uniqueId transaction:transaction];
 
-+ (ThreadDynamicInteractions *)ensureDynamicInteractionsForThread:(TSThread *)thread
-                                                  contactsManager:(OWSContactsManager *)contactsManager
-                                                  blockingManager:(OWSBlockingManager *)blockingManager
-                                                     dbConnection:(YapDatabaseConnection *)dbConnection
-                                      hideUnreadMessagesIndicator:(BOOL)hideUnreadMessagesIndicator
-                                  firstUnseenInteractionTimestamp:
-                                      (nullable NSNumber *)firstUnseenInteractionTimestampParameter
-                                                     maxRangeSize:(int)maxRangeSize
-{
-    OWSAssert(thread);
-    OWSAssert(dbConnection);
-    OWSAssert(contactsManager);
-    OWSAssert(blockingManager);
-    OWSAssert(maxRangeSize > 0);
+    uint32_t expiresInSeconds = (configuration.isEnabled ? configuration.durationSeconds : 0);
 
-    NSString *localNumber = [TSAccountManager localNumber];
-    OWSAssert(localNumber.length > 0);
+    for (SignalAttachment *attachment in attachments) {
+        OWSAssertDebug(!attachment.hasError);
+        OWSAssertDebug(attachment.mimeType.length > 0);
+    }
 
-    // Many OWSProfileManager methods aren't safe to call from inside a database
-    // transaction, so do this work now.
-    OWSProfileManager *profileManager = OWSProfileManager.sharedManager;
-    BOOL hasLocalProfile = [profileManager hasLocalProfile];
-    BOOL isThreadInProfileWhitelist = [profileManager isThreadInProfileWhitelist:thread];
-    BOOL hasUnwhitelistedMember = NO;
-    for (NSString *recipientId in thread.recipientIdentifiers) {
-        if (![profileManager isUserInProfileWhitelist:recipientId]) {
-            hasUnwhitelistedMember = YES;
+    BOOL isVoiceMessage = (attachments.count == 1 && attachments.lastObject.isVoiceMessage);
+
+    BOOL isViewOnceMessage = NO;
+    for (SignalAttachment *attachment in mediaAttachments) {
+        if (attachment.isViewOnceAttachment) {
+            OWSAssertDebug(mediaAttachments.count == 1);
+            isViewOnceMessage = YES;
             break;
         }
     }
 
-    ThreadDynamicInteractions *result = [ThreadDynamicInteractions new];
+    TSOutgoingMessage *message =
+        [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:[NSDate ows_millisecondTimeStamp]
+                                                           inThread:thread
+                                                        messageBody:truncatedText
+                                                      attachmentIds:[NSMutableArray new]
+                                                   expiresInSeconds:expiresInSeconds
+                                                    expireStartedAt:0
+                                                     isVoiceMessage:isVoiceMessage
+                                                   groupMetaMessage:TSGroupMetaMessageUnspecified
+                                                      quotedMessage:[quotedReplyModel buildQuotedMessageForSending]
+                                                       contactShare:nil
+                                                        linkPreview:nil
+                                                     messageSticker:nil
+                                                  isViewOnceMessage:isViewOnceMessage];
 
-    [dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
-        const int kMaxBlockOfferOutgoingMessageCount = 10;
+    [BenchManager
+        benchAsyncWithTitle:@"Saving outgoing message"
+                      block:^(void (^benchmarkCompletion)(void)) {
+                          // To avoid blocking the send flow, we dispatch an async write from within this read
+                          // transaction
+                          [self.databaseStorage
+                              asyncWriteWithBlock:^(SDSAnyWriteTransaction *writeTransaction) {
+                                  [message anyInsertWithTransaction:writeTransaction];
 
-        // Find any "dynamic" interactions and safety number changes.
-        //
-        // We use different views for performance reasons.
-        __block TSUnreadIndicatorInteraction *existingUnreadIndicator = nil;
-        __block OWSContactOffersInteraction *existingContactOffers = nil;
-        NSMutableArray<TSInvalidIdentityKeyErrorMessage *> *blockingSafetyNumberChanges = [NSMutableArray new];
-        NSMutableArray<TSInteraction *> *nonBlockingSafetyNumberChanges = [NSMutableArray new];
-        // We want to delete legacy and duplicate interactions.
-        NSMutableArray<TSInteraction *> *interactionsToDelete = [NSMutableArray new];
-        [[TSDatabaseView threadSpecialMessagesDatabaseView:transaction]
-            enumerateRowsInGroup:thread.uniqueId
-                      usingBlock:^(
-                          NSString *collection, NSString *key, id object, id metadata, NSUInteger index, BOOL *stop) {
+                                  if (writeTransaction.transitional_yapWriteTransaction != nil) {
+                                      OWSLinkPreview *_Nullable linkPreview =
+                                          [self linkPreviewForLinkPreviewDraft:linkPreviewDraft
+                                                                   transaction:writeTransaction
+                                                                                   .transitional_yapWriteTransaction];
+                                      if (linkPreview) {
+                                          [message updateWithLinkPreview:linkPreview transaction:writeTransaction];
+                                      }
+                                  }
 
-                          if ([object isKindOfClass:[OWSUnknownContactBlockOfferMessage class]]) {
-                              // Delete this legacy interactions, which has been superseded by
-                              // the OWSContactOffersInteraction.
-                              [interactionsToDelete addObject:object];
-                          } else if ([object isKindOfClass:[OWSAddToContactsOfferMessage class]]) {
-                              // Delete this legacy interactions, which has been superseded by
-                              // the OWSContactOffersInteraction.
-                              [interactionsToDelete addObject:object];
-                          } else if ([object isKindOfClass:[OWSAddToProfileWhitelistOfferMessage class]]) {
-                              // Delete this legacy interactions, which has been superseded by
-                              // the OWSContactOffersInteraction.
-                              [interactionsToDelete addObject:object];
-                          } else if ([object isKindOfClass:[TSUnreadIndicatorInteraction class]]) {
-                              OWSAssert(!existingUnreadIndicator);
-                              if (existingUnreadIndicator) {
-                                  // There should never be more than one unread indicator in
-                                  // a given thread, but if there is, discard all but one.
-                                  [interactionsToDelete addObject:existingUnreadIndicator];
+                                  NSMutableArray<OWSOutgoingAttachmentInfo *> *attachmentInfos = [NSMutableArray new];
+                                  for (SignalAttachment *attachment in attachments) {
+                                      OWSOutgoingAttachmentInfo *attachmentInfo =
+                                          [attachment buildOutgoingAttachmentInfoWithMessage:message];
+                                      [attachmentInfos addObject:attachmentInfo];
+                                  }
+                                  completionBlock(message, attachmentInfos, writeTransaction);
                               }
-                              existingUnreadIndicator = (TSUnreadIndicatorInteraction *)object;
-                          } else if ([object isKindOfClass:[OWSContactOffersInteraction class]]) {
-                              OWSAssert(!existingContactOffers);
-                              if (existingContactOffers) {
-                                  // There should never be more than one "contact offers" in
-                                  // a given thread, but if there is, discard all but one.
-                                  [interactionsToDelete addObject:existingContactOffers];
-                              }
-                              existingContactOffers = (OWSContactOffersInteraction *)object;
-                          } else if ([object isKindOfClass:[TSInvalidIdentityKeyErrorMessage class]]) {
-                              [blockingSafetyNumberChanges addObject:object];
-                          } else if ([object isKindOfClass:[TSErrorMessage class]]) {
-                              TSErrorMessage *errorMessage = (TSErrorMessage *)object;
-                              OWSAssert(errorMessage.errorType == TSErrorMessageNonBlockingIdentityChange);
-                              [nonBlockingSafetyNumberChanges addObject:errorMessage];
-                          } else {
-                              OWSFail(@"Unexpected dynamic interaction type: %@", [object class]);
-                          }
+                                       completion:benchmarkCompletion];
                       }];
 
-        for (TSInteraction *interaction in interactionsToDelete) {
-            DDLogDebug(@"Cleaning up interaction: %@", [interaction class]);
-            [interaction removeWithTransaction:transaction];
-        }
+    return message;
+}
 
-        // Determine if there are "unread" messages in this conversation.
-        // If we've been passed a firstUnseenInteractionTimestampParameter,
-        // just use that value in order to preserve continuity of the
-        // unread messages indicator after all messages in the conversation
-        // have been marked as read.
-        //
-        // IFF this variable is non-null, there are unseen messages in the thread.
-        if (firstUnseenInteractionTimestampParameter) {
-            result.firstUnseenInteractionTimestamp = firstUnseenInteractionTimestampParameter;
-        } else {
-            TSInteraction *_Nullable firstUnseenInteraction =
-                [[TSDatabaseView unseenDatabaseViewExtension:transaction] firstObjectInGroup:thread.uniqueId];
-            if (firstUnseenInteraction) {
-                result.firstUnseenInteractionTimestamp = @(firstUnseenInteraction.timestampForSorting);
-            }
-        }
++ (TSOutgoingMessage *)enqueueMessageWithContactShare:(OWSContact *)contactShare inThread:(TSThread *)thread
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(contactShare);
+    OWSAssertDebug(contactShare.ows_isValid);
+    OWSAssertDebug(thread);
 
-        __block TSInteraction *firstCallOrMessage = nil;
-        [[transaction ext:TSMessageDatabaseViewExtensionName]
-            enumerateRowsInGroup:thread.uniqueId
-                      usingBlock:^(
-                          NSString *collection, NSString *key, id object, id metadata, NSUInteger index, BOOL *stop) {
+    OWSDisappearingMessagesConfiguration *configuration =
+        [OWSDisappearingMessagesConfiguration fetchObjectWithUniqueID:thread.uniqueId];
 
-                          OWSAssert([object isKindOfClass:[TSInteraction class]]);
+    uint32_t expiresInSeconds = (configuration.isEnabled ? configuration.durationSeconds : 0);
+    TSOutgoingMessage *message =
+        [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:[NSDate ows_millisecondTimeStamp]
+                                                           inThread:thread
+                                                        messageBody:nil
+                                                      attachmentIds:[NSMutableArray new]
+                                                   expiresInSeconds:expiresInSeconds
+                                                    expireStartedAt:0
+                                                     isVoiceMessage:NO
+                                                   groupMetaMessage:TSGroupMetaMessageUnspecified
+                                                      quotedMessage:nil
+                                                       contactShare:contactShare
+                                                        linkPreview:nil
+                                                     messageSticker:nil
+                                                  isViewOnceMessage:NO];
 
-                          if ([object isKindOfClass:[TSIncomingMessage class]] ||
-                              [object isKindOfClass:[TSOutgoingMessage class]] ||
-                              [object isKindOfClass:[TSCall class]]) {
-                              firstCallOrMessage = object;
-                              *stop = YES;
-                          }
-                      }];
-
-        NSUInteger outgoingMessageCount =
-            [[TSDatabaseView threadOutgoingMessageDatabaseView:transaction] numberOfItemsInGroup:thread.uniqueId];
-        NSUInteger threadMessageCount =
-            [[transaction ext:TSMessageDatabaseViewExtensionName] numberOfItemsInGroup:thread.uniqueId];
-
-        // Enumerate in reverse to count the number of messages
-        // after the unseen messages indicator.  Not all of
-        // them are unnecessarily unread, but we need to tell
-        // the messages view the position of the unread indicator,
-        // so that it can widen its "load window" to always show
-        // the unread indicator.
-        __block long visibleUnseenMessageCount = 0;
-        __block TSInteraction *interactionAfterUnreadIndicator = nil;
-        NSUInteger missingUnseenSafetyNumberChangeCount = 0;
-        if (result.firstUnseenInteractionTimestamp != nil) {
-            [[transaction ext:TSMessageDatabaseViewExtensionName]
-                enumerateRowsInGroup:thread.uniqueId
-                         withOptions:NSEnumerationReverse
-                          usingBlock:^(NSString *collection,
-                              NSString *key,
-                              id object,
-                              id metadata,
-                              NSUInteger index,
-                              BOOL *stop) {
-
-                              if (![object isKindOfClass:[TSInteraction class]]) {
-                                  OWSFail(@"Expected a TSInteraction: %@", [object class]);
-                                  return;
-                              }
-
-                              TSInteraction *interaction = (TSInteraction *)object;
-
-                              if (interaction.isDynamicInteraction) {
-                                  // Ignore dynamic interactions, if any.
-                                  return;
-                              }
-
-                              if (interaction.timestampForSorting
-                                  < result.firstUnseenInteractionTimestamp.unsignedLongLongValue) {
-                                  // By default we want the unread indicator to appear just before
-                                  // the first unread message.
-                                  *stop = YES;
-                                  return;
-                              }
-
-                              visibleUnseenMessageCount++;
-
-                              interactionAfterUnreadIndicator = interaction;
-
-                              if (visibleUnseenMessageCount + 1 >= maxRangeSize) {
-                                  // If there are more unseen messages than can be displayed in the
-                                  // messages view, show the unread indicator at the top of the
-                                  // displayed messages.
-                                  *stop = YES;
-                                  result.hasMoreUnseenMessages = YES;
-                              }
-                          }];
-
-            if (!interactionAfterUnreadIndicator) {
-                // If we can't find an interaction after the unread indicator,
-                // remove it.  All unread messages may have been deleted or
-                // expired.
-                result.firstUnseenInteractionTimestamp = nil;
-            } else if (result.hasMoreUnseenMessages) {
-                NSMutableSet<NSData *> *missingUnseenSafetyNumberChanges = [NSMutableSet set];
-                for (TSInvalidIdentityKeyErrorMessage *safetyNumberChange in blockingSafetyNumberChanges) {
-                    BOOL isUnseen = safetyNumberChange.timestampForSorting
-                        >= result.firstUnseenInteractionTimestamp.unsignedLongLongValue;
-                    if (!isUnseen) {
-                        continue;
-                    }
-                    BOOL isMissing
-                        = safetyNumberChange.timestampForSorting < interactionAfterUnreadIndicator.timestampForSorting;
-                    if (!isMissing) {
-                        continue;
-                    }
-
-                    NSData *_Nullable newIdentityKey = safetyNumberChange.newIdentityKey;
-                    if (newIdentityKey == nil) {
-                        OWSFail(@"Safety number change was missing it's new identity key.");
-                        continue;
-                    }
-
-                    [missingUnseenSafetyNumberChanges addObject:newIdentityKey];
-                }
-
-                // Count the de-duplicated "blocking" safety number changes and all
-                // of the "non-blocking" safety number changes.
-                missingUnseenSafetyNumberChangeCount
-                    = (missingUnseenSafetyNumberChanges.count + nonBlockingSafetyNumberChanges.count);
-            }
-        }
-        if (result.firstUnseenInteractionTimestamp) {
-            // The unread indicator is _before_ the last visible unseen message.
-            result.unreadIndicatorPosition = @(visibleUnseenMessageCount);
-        }
-        OWSAssert((result.firstUnseenInteractionTimestamp != nil) == (result.unreadIndicatorPosition != nil));
-
-        BOOL shouldHaveBlockOffer = YES;
-        BOOL shouldHaveAddToContactsOffer = YES;
-        BOOL shouldHaveAddToProfileWhitelistOffer = YES;
-
-        BOOL isContactThread = [thread isKindOfClass:[TSContactThread class]];
-        if (!isContactThread) {
-            // Only create "add to contacts" offers in 1:1 conversations.
-            shouldHaveAddToContactsOffer = NO;
-            // Only create block offers in 1:1 conversations.
-            shouldHaveBlockOffer = NO;
-            // Only create profile whitelist offers in 1:1 conversations.
-            shouldHaveAddToProfileWhitelistOffer = NO;
-        } else {
-            NSString *recipientId = ((TSContactThread *)thread).contactIdentifier;
-
-            if ([recipientId isEqualToString:localNumber]) {
-                // Don't add self to contacts.
-                shouldHaveAddToContactsOffer = NO;
-                // Don't bother to block self.
-                shouldHaveBlockOffer = NO;
-                // Don't bother adding self to profile whitelist.
-                shouldHaveAddToProfileWhitelistOffer = NO;
-            } else {
-                if ([[blockingManager blockedPhoneNumbers] containsObject:recipientId]) {
-                    // Only create "add to contacts" offers for users which are not already blocked.
-                    shouldHaveAddToContactsOffer = NO;
-                    // Only create block offers for users which are not already blocked.
-                    shouldHaveBlockOffer = NO;
-                    // Don't create profile whitelist offers for users which are not already blocked.
-                    shouldHaveAddToProfileWhitelistOffer = NO;
-                }
-
-                if ([contactsManager hasSignalAccountForRecipientId:recipientId]) {
-                    // Only create "add to contacts" offers for non-contacts.
-                    shouldHaveAddToContactsOffer = NO;
-                    // Only create block offers for non-contacts.
-                    shouldHaveBlockOffer = NO;
-                    // Don't create profile whitelist offers for non-contacts.
-                    shouldHaveAddToProfileWhitelistOffer = NO;
-                }
-            }
-        }
-
-        if (!firstCallOrMessage) {
-            shouldHaveAddToContactsOffer = NO;
-            shouldHaveBlockOffer = NO;
-            shouldHaveAddToProfileWhitelistOffer = NO;
-        }
-
-        if (outgoingMessageCount > kMaxBlockOfferOutgoingMessageCount) {
-            // If the user has sent more than N messages, don't show a block offer.
-            shouldHaveBlockOffer = NO;
-        }
-
-        BOOL hasOutgoingBeforeIncomingInteraction = [firstCallOrMessage isKindOfClass:[TSOutgoingMessage class]];
-        if ([firstCallOrMessage isKindOfClass:[TSCall class]]) {
-            TSCall *call = (TSCall *)firstCallOrMessage;
-            hasOutgoingBeforeIncomingInteraction
-                = (call.callType == RPRecentCallTypeOutgoing || call.callType == RPRecentCallTypeOutgoingIncomplete);
-        }
-        if (hasOutgoingBeforeIncomingInteraction) {
-            // If there is an outgoing message before an incoming message
-            // the local user initiated this conversation, don't show a block offer.
-            shouldHaveBlockOffer = NO;
-        }
-
-        if (!hasLocalProfile || isThreadInProfileWhitelist) {
-            // Don't show offer if thread is local user hasn't configured their profile.
-            // Don't show offer if thread is already in profile whitelist.
-            shouldHaveAddToProfileWhitelistOffer = NO;
-        } else if (thread.isGroupThread && !hasUnwhitelistedMember) {
-            // Don't show offer in group thread if all members are already individually
-            // whitelisted.
-            shouldHaveAddToProfileWhitelistOffer = NO;
-        }
-
-        BOOL shouldHaveContactOffers
-            = (shouldHaveBlockOffer || shouldHaveAddToContactsOffer || shouldHaveAddToProfileWhitelistOffer);
-        if (isContactThread) {
-            TSContactThread *contactThread = (TSContactThread *)thread;
-            if (contactThread.hasDismissedOffers) {
-                shouldHaveContactOffers = NO;
-            }
-        }
-
-        // We use these offset to control the ordering of the offers and indicators.
-        const int kUnreadIndicatorOffset = -1;
-
-        // We want the offers to be the first interactions in their
-        // conversation's timeline, so we back-date them to slightly before
-        // the first message - or at an aribtrary old timestamp if the
-        // conversation has no messages.
-        uint64_t contactOffersTimestamp = [NSDate ows_millisecondTimeStamp];
-
-        // If the contact offers' properties have changed, discard the current
-        // one and create a new one.
-        if (existingContactOffers) {
-            if (existingContactOffers.hasBlockOffer != shouldHaveBlockOffer
-                || existingContactOffers.hasAddToContactsOffer != shouldHaveAddToContactsOffer
-                || existingContactOffers.hasAddToProfileWhitelistOffer != shouldHaveAddToProfileWhitelistOffer) {
-                DDLogInfo(@"%@ Removing stale contact offers: %@ (%llu)",
-                    self.logTag,
-                    existingContactOffers.uniqueId,
-                    existingContactOffers.timestampForSorting);
-                // Preserve the timestamp of the existing "contact offers" so that
-                // we replace it in the same position in the timeline.
-                contactOffersTimestamp = existingContactOffers.timestamp;
-                [existingContactOffers removeWithTransaction:transaction];
-                existingContactOffers = nil;
-            }
-        }
-
-        if (existingContactOffers && !shouldHaveContactOffers) {
-            DDLogInfo(@"%@ Removing contact offers: %@ (%llu)",
-                self.logTag,
-                existingContactOffers.uniqueId,
-                existingContactOffers.timestampForSorting);
-            [existingContactOffers removeWithTransaction:transaction];
-        } else if (!existingContactOffers && shouldHaveContactOffers) {
-            NSString *recipientId = ((TSContactThread *)thread).contactIdentifier;
-
-            TSInteraction *offersMessage =
-                [[OWSContactOffersInteraction alloc] initWithTimestamp:contactOffersTimestamp
-                                                                thread:thread
-                                                         hasBlockOffer:shouldHaveBlockOffer
-                                                 hasAddToContactsOffer:shouldHaveAddToContactsOffer
-                                         hasAddToProfileWhitelistOffer:shouldHaveAddToProfileWhitelistOffer
-                                                           recipientId:recipientId];
-            [offersMessage saveWithTransaction:transaction];
-
-            DDLogInfo(@"%@ Creating contact offers: %@ (%llu)",
-                self.logTag,
-                offersMessage.uniqueId,
-                offersMessage.timestampForSorting);
-        }
-
-        BOOL shouldHaveUnreadIndicator
-            = (interactionAfterUnreadIndicator && !hideUnreadMessagesIndicator && threadMessageCount > 1);
-        if (!shouldHaveUnreadIndicator) {
-            if (existingUnreadIndicator) {
-                DDLogInfo(@"%@ Removing obsolete TSUnreadIndicatorInteraction: %@",
-                    self.logTag,
-                    existingUnreadIndicator.uniqueId);
-                [existingUnreadIndicator removeWithTransaction:transaction];
-            }
-        } else {
-            // We want the unread indicator to appear just before the first unread incoming
-            // message in the conversation timeline...
-            //
-            // ...unless we have a fixed timestamp for the unread indicator.
-            uint64_t indicatorTimestamp
-                = (uint64_t)((long long)interactionAfterUnreadIndicator.timestampForSorting + kUnreadIndicatorOffset);
-
-            if (indicatorTimestamp && existingUnreadIndicator.timestampForSorting == indicatorTimestamp) {
-                // Keep the existing indicator; it is in the correct position.
-            } else {
-                if (existingUnreadIndicator) {
-                    DDLogInfo(@"%@ Removing TSUnreadIndicatorInteraction due to changed timestamp: %@",
-                        self.logTag,
-                        existingUnreadIndicator.uniqueId);
-                    [existingUnreadIndicator removeWithTransaction:transaction];
-                }
-
-                TSUnreadIndicatorInteraction *indicator =
-                    [[TSUnreadIndicatorInteraction alloc] initWithTimestamp:indicatorTimestamp
-                                                                     thread:thread
-                                                      hasMoreUnseenMessages:result.hasMoreUnseenMessages
-                                       missingUnseenSafetyNumberChangeCount:missingUnseenSafetyNumberChangeCount];
-                [indicator saveWithTransaction:transaction];
-
-                DDLogInfo(@"%@ Creating TSUnreadIndicatorInteraction: %@ (%llu)",
-                    self.logTag,
-                    indicator.uniqueId,
-                    indicator.timestampForSorting);
-            }
-        }
+    [self.dbConnection asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
+        [message saveWithTransaction:transaction];
+        [self.messageSenderJobQueue addMessage:message transaction:transaction.asAnyWrite];
     }];
+
+    return message;
+}
+
++ (TSOutgoingMessage *)enqueueMessageWithSticker:(StickerInfo *)stickerInfo inThread:(TSThread *)thread
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(stickerInfo);
+    OWSAssertDebug(thread);
+
+    OWSDisappearingMessagesConfiguration *configuration =
+        [OWSDisappearingMessagesConfiguration fetchObjectWithUniqueID:thread.uniqueId];
+
+    uint32_t expiresInSeconds = (configuration.isEnabled ? configuration.durationSeconds : 0);
+
+    TSOutgoingMessage *message =
+        [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:[NSDate ows_millisecondTimeStamp]
+                                                           inThread:thread
+                                                        messageBody:nil
+                                                      attachmentIds:[NSMutableArray new]
+                                                   expiresInSeconds:expiresInSeconds
+                                                    expireStartedAt:0
+                                                     isVoiceMessage:NO
+                                                   groupMetaMessage:TSGroupMetaMessageUnspecified
+                                                      quotedMessage:nil
+                                                       contactShare:nil
+                                                        linkPreview:nil
+                                                     messageSticker:nil
+                                                  isViewOnceMessage:NO];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        // Load the sticker data async.
+        NSString *_Nullable filePath = [StickerManager filepathForInstalledStickerWithStickerInfo:stickerInfo];
+        if (!filePath) {
+            OWSFailDebug(@"Could not find sticker file.");
+            return;
+        }
+        NSData *_Nullable stickerData = [NSData dataWithContentsOfFile:filePath];
+        if (!stickerData) {
+            OWSFailDebug(@"Couldn't load sticker data.");
+            return;
+        }
+        MessageStickerDraft *stickerDraft =
+            [[MessageStickerDraft alloc] initWithInfo:stickerInfo stickerData:stickerData];
+
+        [self.dbConnection readWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
+            MessageSticker *_Nullable messageSticker =
+                [self messageStickerForStickerDraft:stickerDraft transaction:transaction];
+            if (!messageSticker) {
+                OWSFailDebug(@"Couldn't send sticker.");
+                return;
+            }
+
+            [message anyInsertWithTransaction:transaction.asAnyWrite];
+            [message updateWithMessageSticker:messageSticker transaction:transaction.asAnyWrite];
+
+            [self.messageSenderJobQueue addMessage:message transaction:transaction.asAnyWrite];
+        }];
+    });
+
+    return message;
+}
+
++ (void)enqueueLeaveGroupMessageInThread:(TSGroupThread *)thread
+{
+    OWSAssertDebug([thread isKindOfClass:[TSGroupThread class]]);
+
+    TSOutgoingMessage *message =
+        [TSOutgoingMessage outgoingMessageInThread:thread groupMetaMessage:TSGroupMetaMessageQuit expiresInSeconds:0];
+
+    [self.dbConnection asyncReadWriteWithBlock:^(YapDatabaseReadWriteTransaction *_Nonnull transaction) {
+        [self.messageSenderJobQueue addMessage:message transaction:transaction.asAnyWrite];
+    }];
+}
+
+// MARK: Non-Durable Sending
+
+// We might want to generate a link preview here.
++ (TSOutgoingMessage *)sendMessageNonDurablyWithText:(NSString *)fullMessageText
+                                            inThread:(TSThread *)thread
+                                    quotedReplyModel:(nullable OWSQuotedReplyModel *)quotedReplyModel
+                                         transaction:(YapDatabaseReadTransaction *)transaction
+                                       messageSender:(OWSMessageSender *)messageSender
+                                          completion:(void (^)(NSError *_Nullable error))completion
+{
+    OWSAssertDebug(completion);
+
+    return [self sendMessageNonDurablyWithText:fullMessageText
+                              mediaAttachments:@[]
+                                      inThread:thread
+                              quotedReplyModel:quotedReplyModel
+                                   transaction:transaction
+                                 messageSender:messageSender
+                                    completion:completion];
+}
+
++ (TSOutgoingMessage *)sendMessageNonDurablyWithText:(NSString *)fullMessageText
+                                    mediaAttachments:(NSArray<SignalAttachment *> *)mediaAttachments
+                                            inThread:(TSThread *)thread
+                                    quotedReplyModel:(nullable OWSQuotedReplyModel *)quotedReplyModel
+                                         transaction:(YapDatabaseReadTransaction *)transaction
+                                       messageSender:(OWSMessageSender *)messageSender
+                                          completion:(void (^)(NSError *_Nullable error))completion
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(thread);
+    OWSAssertDebug(completion);
+
+    return
+        [self buildOutgoingMessageWithText:fullMessageText
+                          mediaAttachments:mediaAttachments
+                                    thread:thread
+                          quotedReplyModel:quotedReplyModel
+                          linkPreviewDraft:nil
+                               transaction:transaction.asAnyRead
+                                completion:^(TSOutgoingMessage *_Nonnull savedMessage,
+                                    NSMutableArray<OWSOutgoingAttachmentInfo *> *_Nonnull attachmentInfos,
+                                    SDSAnyWriteTransaction *writeTransaction) {
+                                    if (attachmentInfos.count == 0) {
+                                        [messageSender sendMessage:savedMessage
+                                            success:^{
+                                                dispatch_async(dispatch_get_main_queue(), ^(void) {
+                                                    completion(nil);
+                                                });
+                                            }
+                                            failure:^(NSError *error) {
+                                                dispatch_async(dispatch_get_main_queue(), ^(void) {
+                                                    completion(error);
+                                                });
+                                            }];
+                                    } else {
+                                        [messageSender sendAttachments:attachmentInfos
+                                            inMessage:savedMessage
+                                            success:^{
+                                                dispatch_async(dispatch_get_main_queue(), ^(void) {
+                                                    completion(nil);
+                                                });
+                                            }
+                                            failure:^(NSError *error) {
+                                                dispatch_async(dispatch_get_main_queue(), ^(void) {
+                                                    completion(error);
+                                                });
+                                            }];
+                                    }
+                                }];
+}
+
++ (TSOutgoingMessage *)sendMessageNonDurablyWithContactShare:(OWSContact *)contactShare
+                                                    inThread:(TSThread *)thread
+                                               messageSender:(OWSMessageSender *)messageSender
+                                                  completion:(void (^)(NSError *_Nullable error))completion
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(contactShare);
+    OWSAssertDebug(contactShare.ows_isValid);
+    OWSAssertDebug(thread);
+    OWSAssertDebug(messageSender);
+    OWSAssertDebug(completion);
+
+    OWSDisappearingMessagesConfiguration *configuration =
+        [OWSDisappearingMessagesConfiguration fetchObjectWithUniqueID:thread.uniqueId];
+
+    uint32_t expiresInSeconds = (configuration.isEnabled ? configuration.durationSeconds : 0);
+    // MJK TODO - remove senderTimestamp
+    TSOutgoingMessage *message =
+        [[TSOutgoingMessage alloc] initOutgoingMessageWithTimestamp:[NSDate ows_millisecondTimeStamp]
+                                                           inThread:thread
+                                                        messageBody:nil
+                                                      attachmentIds:[NSMutableArray new]
+                                                   expiresInSeconds:expiresInSeconds
+                                                    expireStartedAt:0
+                                                     isVoiceMessage:NO
+                                                   groupMetaMessage:TSGroupMetaMessageUnspecified
+                                                      quotedMessage:nil
+                                                       contactShare:contactShare
+                                                        linkPreview:nil
+                                                     messageSticker:nil
+                                                  isViewOnceMessage:NO];
+
+    [messageSender sendMessage:message
+        success:^{
+            OWSLogDebug(@"Successfully sent contact share.");
+            dispatch_async(dispatch_get_main_queue(), ^(void) {
+                completion(nil);
+            });
+        }
+        failure:^(NSError *error) {
+            OWSLogError(@"Failed to send contact share with error: %@", error);
+            dispatch_async(dispatch_get_main_queue(), ^(void) {
+                completion(error);
+            });
+        }];
+
+    return message;
+}
+
++ (nullable OWSLinkPreview *)linkPreviewForLinkPreviewDraft:(nullable OWSLinkPreviewDraft *)linkPreviewDraft
+                                                transaction:(YapDatabaseReadWriteTransaction *)transaction
+{
+    OWSAssertDebug(transaction);
+
+    if (!linkPreviewDraft) {
+        return nil;
+    }
+    NSError *linkPreviewError;
+    OWSLinkPreview *_Nullable linkPreview = [OWSLinkPreview buildValidatedLinkPreviewFromInfo:linkPreviewDraft
+                                                                                  transaction:transaction.asAnyWrite
+                                                                                        error:&linkPreviewError];
+    if (linkPreviewError && ![OWSLinkPreview isNoPreviewError:linkPreviewError]) {
+        OWSLogError(@"linkPreviewError: %@", linkPreviewError);
+    }
+    return linkPreview;
+}
+
++ (nullable MessageSticker *)messageStickerForStickerDraft:(MessageStickerDraft *)stickerDraft
+                                               transaction:(YapDatabaseReadWriteTransaction *)transaction
+{
+    OWSAssertDebug(transaction);
+
+    NSError *error;
+    MessageSticker *_Nullable messageSticker =
+        [MessageSticker buildValidatedMessageStickerFromDraft:stickerDraft
+                                                  transaction:transaction.asAnyWrite
+                                                        error:&error];
+    if (error && ![MessageSticker isNoStickerError:error]) {
+        OWSFailDebug(@"error: %@", error);
+    }
+    return messageSticker;
+}
+
+#pragma mark - Dynamic Interactions
+
++ (ThreadDynamicInteractions *)ensureDynamicInteractionsForThread:(TSThread *)thread
+                                                  contactsManager:(OWSContactsManager *)contactsManager
+                                                  blockingManager:(OWSBlockingManager *)blockingManager
+                                      hideUnreadMessagesIndicator:(BOOL)hideUnreadMessagesIndicator
+                                              lastUnreadIndicator:(nullable OWSUnreadIndicator *)lastUnreadIndicator
+                                                   focusMessageId:(nullable NSString *)focusMessageId
+                                                     maxRangeSize:(NSUInteger)maxRangeSize
+                                                      transaction:(SDSAnyReadTransaction *)transaction
+{
+    OWSAssertDebug(thread);
+    OWSAssertDebug(contactsManager);
+    OWSAssertDebug(blockingManager);
+    OWSAssertDebug(maxRangeSize > 0);
+    OWSAssertDebug(transaction);
+
+    ThreadDynamicInteractions *result = [ThreadDynamicInteractions new];
+    if (!transaction.transitional_yapReadTransaction) {
+        return result;
+    }
+
+    // Find any "dynamic" interactions and safety number changes.
+    //
+    // We use different views for performance reasons.
+    NSMutableArray<TSInvalidIdentityKeyErrorMessage *> *blockingSafetyNumberChanges = [NSMutableArray new];
+    NSMutableArray<TSInteraction *> *nonBlockingSafetyNumberChanges = [NSMutableArray new];
+    [[TSDatabaseView threadSpecialMessagesDatabaseView:transaction.transitional_yapReadTransaction]
+        enumerateKeysAndObjectsInGroup:thread.uniqueId
+                            usingBlock:^(NSString *collection, NSString *key, id object, NSUInteger index, BOOL *stop) {
+                                if ([object isKindOfClass:[TSInvalidIdentityKeyErrorMessage class]]) {
+                                    [blockingSafetyNumberChanges addObject:object];
+                                } else if ([object isKindOfClass:[TSErrorMessage class]]) {
+                                    TSErrorMessage *errorMessage = (TSErrorMessage *)object;
+                                    OWSAssertDebug(errorMessage.errorType == TSErrorMessageNonBlockingIdentityChange);
+                                    [nonBlockingSafetyNumberChanges addObject:errorMessage];
+                                } else {
+                                    OWSFailDebug(@"Unexpected dynamic interaction type: %@", [object class]);
+                                }
+                            }];
+
+    // Determine if there are "unread" messages in this conversation.
+    // If we've been passed a firstUnseenInteractionTimestampParameter,
+    // just use that value in order to preserve continuity of the
+    // unread messages indicator after all messages in the conversation
+    // have been marked as read.
+    //
+    // IFF this variable is non-null, there are unseen messages in the thread.
+    NSNumber *_Nullable firstUnseenSortId = nil;
+    if (lastUnreadIndicator) {
+        firstUnseenSortId = @(lastUnreadIndicator.firstUnseenSortId);
+    } else {
+        TSInteraction *_Nullable firstUnseenInteraction =
+            [[TSDatabaseView unseenDatabaseViewExtension:transaction.transitional_yapReadTransaction]
+                firstObjectInGroup:thread.uniqueId];
+        if (firstUnseenInteraction) {
+            firstUnseenSortId = @(firstUnseenInteraction.sortId);
+        }
+    }
+
+    [self ensureUnreadIndicator:result
+                                thread:thread
+                           transaction:transaction.transitional_yapReadTransaction
+                          maxRangeSize:maxRangeSize
+           blockingSafetyNumberChanges:blockingSafetyNumberChanges
+        nonBlockingSafetyNumberChanges:nonBlockingSafetyNumberChanges
+           hideUnreadMessagesIndicator:hideUnreadMessagesIndicator
+                     firstUnseenSortId:firstUnseenSortId];
+
+    // Determine the position of the focus message _after_ performing any mutations
+    // around dynamic interactions.
+    if (focusMessageId != nil) {
+        result.focusMessagePosition = [self focusMessagePositionForThread:thread
+                                                              transaction:transaction.transitional_yapReadTransaction
+                                                           focusMessageId:focusMessageId];
+    }
 
     return result;
 }
 
++ (void)ensureUnreadIndicator:(ThreadDynamicInteractions *)dynamicInteractions
+                            thread:(TSThread *)thread
+                       transaction:(YapDatabaseReadTransaction *)transaction
+                      maxRangeSize:(NSUInteger)maxRangeSize
+       blockingSafetyNumberChanges:(NSArray<TSInvalidIdentityKeyErrorMessage *> *)blockingSafetyNumberChanges
+    nonBlockingSafetyNumberChanges:(NSArray<TSInteraction *> *)nonBlockingSafetyNumberChanges
+       hideUnreadMessagesIndicator:(BOOL)hideUnreadMessagesIndicator
+                 firstUnseenSortId:(nullable NSNumber *)firstUnseenSortId
+{
+    OWSAssertDebug(dynamicInteractions);
+    OWSAssertDebug(thread);
+    OWSAssertDebug(transaction);
+    OWSAssertDebug(blockingSafetyNumberChanges);
+    OWSAssertDebug(nonBlockingSafetyNumberChanges);
+
+    if (hideUnreadMessagesIndicator) {
+        return;
+    }
+    if (!firstUnseenSortId) {
+        // If there are no unseen interactions, don't show an unread indicator.
+        return;
+    }
+
+    YapDatabaseViewTransaction *threadMessagesTransaction = [transaction ext:TSMessageDatabaseViewExtensionName];
+    OWSAssertDebug([threadMessagesTransaction isKindOfClass:[YapDatabaseViewTransaction class]]);
+
+    // Determine unread indicator position, if necessary.
+    //
+    // Enumerate in reverse to count the number of messages
+    // after the unseen messages indicator.  Not all of
+    // them are unnecessarily unread, but we need to tell
+    // the messages view the position of the unread indicator,
+    // so that it can widen its "load window" to always show
+    // the unread indicator.
+    __block long visibleUnseenMessageCount = 0;
+    __block TSInteraction *interactionAfterUnreadIndicator = nil;
+    __block BOOL hasMoreUnseenMessages = NO;
+    [threadMessagesTransaction
+        enumerateKeysAndObjectsInGroup:thread.uniqueId
+                           withOptions:NSEnumerationReverse
+                            usingBlock:^(NSString *collection, NSString *key, id object, NSUInteger index, BOOL *stop) {
+                                if (![object isKindOfClass:[TSInteraction class]]) {
+                                    OWSFailDebug(@"Expected a TSInteraction: %@", [object class]);
+                                    return;
+                                }
+
+                                TSInteraction *interaction = (TSInteraction *)object;
+
+                                if (interaction.isDynamicInteraction) {
+                                    // Ignore dynamic interactions, if any.
+                                    return;
+                                }
+
+                                if (interaction.sortId < firstUnseenSortId.unsignedLongLongValue) {
+                                    // By default we want the unread indicator to appear just before
+                                    // the first unread message.
+                                    *stop = YES;
+                                    return;
+                                }
+
+                                visibleUnseenMessageCount++;
+
+                                interactionAfterUnreadIndicator = interaction;
+
+                                if (visibleUnseenMessageCount + 1 >= maxRangeSize) {
+                                    // If there are more unseen messages than can be displayed in the
+                                    // messages view, show the unread indicator at the top of the
+                                    // displayed messages.
+                                    *stop = YES;
+                                    hasMoreUnseenMessages = YES;
+                                }
+                            }];
+
+    if (!interactionAfterUnreadIndicator) {
+        // If we can't find an interaction after the unread indicator,
+        // don't show it.  All unread messages may have been deleted or
+        // expired.
+        return;
+    }
+    OWSAssertDebug(visibleUnseenMessageCount > 0);
+
+    NSUInteger missingUnseenSafetyNumberChangeCount = 0;
+    if (hasMoreUnseenMessages) {
+        NSMutableSet<NSData *> *missingUnseenSafetyNumberChanges = [NSMutableSet set];
+        for (TSInvalidIdentityKeyErrorMessage *safetyNumberChange in blockingSafetyNumberChanges) {
+            BOOL isUnseen = safetyNumberChange.sortId >= firstUnseenSortId.unsignedLongLongValue;
+            if (!isUnseen) {
+                continue;
+            }
+
+            BOOL isMissing = safetyNumberChange.sortId < interactionAfterUnreadIndicator.sortId;
+            if (!isMissing) {
+                continue;
+            }
+
+            @try {
+                NSData *_Nullable newIdentityKey = [safetyNumberChange throws_newIdentityKey];
+                if (newIdentityKey == nil) {
+                    OWSFailDebug(@"Safety number change was missing it's new identity key.");
+                    continue;
+                }
+
+                [missingUnseenSafetyNumberChanges addObject:newIdentityKey];
+            } @catch (NSException *exception) {
+                OWSFailDebug(@"exception: %@", exception);
+            }
+        }
+
+        // Count the de-duplicated "blocking" safety number changes and all
+        // of the "non-blocking" safety number changes.
+        missingUnseenSafetyNumberChangeCount
+            = (missingUnseenSafetyNumberChanges.count + nonBlockingSafetyNumberChanges.count);
+    }
+
+    NSInteger unreadIndicatorPosition = visibleUnseenMessageCount;
+
+    dynamicInteractions.unreadIndicator =
+        [[OWSUnreadIndicator alloc] initWithFirstUnseenSortId:firstUnseenSortId.unsignedLongLongValue
+                                        hasMoreUnseenMessages:hasMoreUnseenMessages
+                         missingUnseenSafetyNumberChangeCount:missingUnseenSafetyNumberChangeCount
+                                      unreadIndicatorPosition:unreadIndicatorPosition];
+    OWSLogInfo(@"Creating Unread Indicator: %llu", dynamicInteractions.unreadIndicator.firstUnseenSortId);
+}
+
++ (nullable NSNumber *)focusMessagePositionForThread:(TSThread *)thread
+                                         transaction:(YapDatabaseReadTransaction *)transaction
+                                      focusMessageId:(NSString *)focusMessageId
+{
+    OWSAssertDebug(thread);
+    OWSAssertDebug(transaction);
+    OWSAssertDebug(focusMessageId);
+
+    YapDatabaseViewTransaction *databaseView = [transaction ext:TSMessageDatabaseViewExtensionName];
+
+    NSString *_Nullable group = nil;
+    NSUInteger index;
+    BOOL success =
+        [databaseView getGroup:&group index:&index forKey:focusMessageId inCollection:TSInteraction.collection];
+    if (!success) {
+        // This might happen if the focus message has disappeared
+        // before this view could appear.
+        OWSFailDebug(@"failed to find focus message index.");
+        return nil;
+    }
+    if (![group isEqualToString:thread.uniqueId]) {
+        OWSFailDebug(@"focus message has invalid group.");
+        return nil;
+    }
+    NSUInteger count = [databaseView numberOfItemsInGroup:thread.uniqueId];
+    if (index >= count) {
+        OWSFailDebug(@"focus message has invalid index.");
+        return nil;
+    }
+    NSUInteger position = (count - index) - 1;
+    return @(position);
+}
+
 + (BOOL)shouldShowGroupProfileBannerInThread:(TSThread *)thread blockingManager:(OWSBlockingManager *)blockingManager
 {
-    OWSAssert(thread);
-    OWSAssert(blockingManager);
+    OWSAssertDebug(thread);
+    OWSAssertDebug(blockingManager);
 
     if (!thread.isGroupThread) {
         return NO;
@@ -572,6 +740,10 @@ NS_ASSUME_NONNULL_BEGIN
     if (![OWSProfileManager.sharedManager hasLocalProfile]) {
         return NO;
     }
+    if ([blockingManager isThreadBlocked:thread]) {
+        return NO;
+    }
+
     BOOL hasUnwhitelistedMember = NO;
     NSArray<NSString *> *blockedPhoneNumbers = [blockingManager blockedPhoneNumbers];
     for (NSString *recipientId in thread.recipientIdentifiers) {
@@ -589,7 +761,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (BOOL)addThreadToProfileWhitelistIfEmptyContactThread:(TSThread *)thread
 {
-    OWSAssert(thread);
+    OWSAssertDebug(thread);
 
     if (thread.isGroupThread) {
         return NO;
@@ -597,12 +769,111 @@ NS_ASSUME_NONNULL_BEGIN
     if ([OWSProfileManager.sharedManager isThreadInProfileWhitelist:thread]) {
         return NO;
     }
-    if (!thread.hasEverHadMessage) {
+    if (!thread.shouldThreadBeVisible) {
         [OWSProfileManager.sharedManager addThreadToProfileWhitelist:thread];
         return YES;
     } else {
         return NO;
     }
+}
+
+#pragma mark - Delete Content
+
++ (void)deleteAllContent
+{
+    OWSLogInfo(@"");
+
+    [OWSPrimaryStorage.sharedManager.newDatabaseConnection
+        readWriteWithBlock:^(YapDatabaseReadWriteTransaction *transaction) {
+            [self removeAllObjectsInCollection:[TSThread collection] class:[TSThread class] transaction:transaction];
+            [self removeAllObjectsInCollection:[TSInteraction collection]
+                                         class:[TSInteraction class]
+                                   transaction:transaction];
+            [self removeAllObjectsInCollection:[TSAttachment collection]
+                                         class:[TSAttachment class]
+                                   transaction:transaction];
+            [self removeAllObjectsInCollection:[SignalRecipient collection]
+                                         class:[SignalRecipient class]
+                                   transaction:transaction];
+        }];
+    [TSAttachmentStream deleteAttachments];
+}
+
++ (void)removeAllObjectsInCollection:(NSString *)collection
+                               class:(Class) class
+                         transaction:(YapDatabaseReadWriteTransaction *)transaction {
+    OWSAssertDebug(collection.length > 0);
+    OWSAssertDebug(class);
+    OWSAssertDebug(transaction);
+
+    NSArray<NSString *> *_Nullable uniqueIds = [transaction allKeysInCollection:collection];
+    if (!uniqueIds) {
+        OWSFailDebug(@"couldn't load uniqueIds for collection: %@.", collection);
+        return;
+    }
+    OWSLogInfo(@"Deleting %lu objects from: %@", (unsigned long)uniqueIds.count, collection);
+    NSUInteger count = 0;
+    for (NSString *uniqueId in uniqueIds) {
+        // We need to fetch each object, since [TSYapDatabaseObject removeWithTransaction:] sometimes does important
+        // work.
+        TSYapDatabaseObject *_Nullable object = [class fetchObjectWithUniqueID:uniqueId transaction:transaction];
+        if (!object) {
+            OWSFailDebug(@"couldn't load object for deletion: %@.", collection);
+            continue;
+        }
+        [object removeWithTransaction:transaction];
+        count++;
+    };
+    OWSLogInfo(@"Deleted %lu/%lu objects from: %@", (unsigned long)count, (unsigned long)uniqueIds.count, collection);
+}
+
+#pragma mark - Find Content
+
++ (nullable TSInteraction *)findInteractionInThreadByTimestamp:(uint64_t)timestamp
+                                                      authorId:(NSString *)authorId
+                                                threadUniqueId:(NSString *)threadUniqueId
+                                                   transaction:(YapDatabaseReadTransaction *)transaction
+{
+    OWSAssertDebug(timestamp > 0);
+    OWSAssertDebug(authorId.length > 0);
+
+    NSString *localNumber = [TSAccountManager localNumber];
+    if (localNumber.length < 1) {
+        OWSFailDebug(@"missing long number.");
+        return nil;
+    }
+
+    NSArray<TSInteraction *> *interactions =
+        [TSInteraction interactionsWithTimestamp:timestamp
+                                          filter:^(TSInteraction *interaction) {
+                                              NSString *_Nullable messageAuthorId = nil;
+                                              if ([interaction isKindOfClass:[TSIncomingMessage class]]) {
+                                                  TSIncomingMessage *incomingMessage = (TSIncomingMessage *)interaction;
+                                                  messageAuthorId = incomingMessage.authorId;
+                                              } else if ([interaction isKindOfClass:[TSOutgoingMessage class]]) {
+                                                  messageAuthorId = localNumber;
+                                              }
+                                              if (messageAuthorId.length < 1) {
+                                                  return NO;
+                                              }
+
+                                              if (![authorId isEqualToString:messageAuthorId]) {
+                                                  return NO;
+                                              }
+                                              if (![interaction.uniqueThreadId isEqualToString:threadUniqueId]) {
+                                                  return NO;
+                                              }
+                                              return YES;
+                                          }
+                                 withTransaction:transaction];
+    if (interactions.count < 1) {
+        return nil;
+    }
+    if (interactions.count > 1) {
+        // In case of collision, take the first.
+        OWSLogError(@"more than one matching interaction in thread.");
+    }
+    return interactions.firstObject;
 }
 
 @end

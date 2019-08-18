@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -10,7 +10,6 @@ protocol GifPickerLayoutDelegate: class {
 
 // A Pinterest-style waterfall layout.
 class GifPickerLayout: UICollectionViewLayout {
-    let TAG = "[GifPickerLayout]"
 
     public weak var delegate: GifPickerLayoutDelegate?
 
@@ -22,7 +21,7 @@ class GifPickerLayout: UICollectionViewLayout {
 
     @available(*, unavailable, message:"use other constructor instead.")
     required init?(coder aDecoder: NSCoder) {
-        fatalError("\(#function) is unimplemented.")
+        notImplemented()
     }
 
     override init() {
@@ -38,7 +37,7 @@ class GifPickerLayout: UICollectionViewLayout {
     }
 
     override func invalidateLayout(with context: UICollectionViewLayoutInvalidationContext) {
-        super.invalidateLayout(with:context)
+        super.invalidateLayout(with: context)
 
         itemAttributesMap.removeAll()
     }
@@ -61,9 +60,7 @@ class GifPickerLayout: UICollectionViewLayout {
         // We  use 2 or 3 columns, depending on the device.
         // 2 columns will show fewer GIFs at a time,
         // but use less network & be a more responsive experience.
-        let screenSize = UIScreen.main.bounds.size
-        let screenWidth = min(screenSize.width, screenSize.height)
-        let columnCount = UInt(max(2, screenWidth / 130))
+        let columnCount = UInt(max(2, collectionView.width() / 130))
 
         let totalViewWidth = UInt(collectionView.width())
         let hTotalWhitespace = (2 * hInset) + (hSpacing * (columnCount - 1))
@@ -108,8 +105,8 @@ class GifPickerLayout: UICollectionViewLayout {
             let cellHeight = UInt(columnWidth * imageInfo.originalRendition.height / imageInfo.originalRendition.width)
 
             let indexPath = NSIndexPath(row: cellIndex, section: 0)
-            let itemAttributes = UICollectionViewLayoutAttributes(forCellWith:indexPath as IndexPath)
-            let itemFrame = CGRect(x:CGFloat(cellX), y:CGFloat(cellY), width:CGFloat(cellWidth), height:CGFloat(cellHeight))
+            let itemAttributes = UICollectionViewLayoutAttributes(forCellWith: indexPath as IndexPath)
+            let itemFrame = CGRect(x: CGFloat(cellX), y: CGFloat(cellY), width: CGFloat(cellWidth), height: CGFloat(cellHeight))
             itemAttributes.frame = itemFrame
             itemAttributesMap[UInt(cellIndex)] = itemAttributes
 
@@ -119,7 +116,7 @@ class GifPickerLayout: UICollectionViewLayout {
 
         // Add bottom margin.
         let contentHeight = contentBottom + vInset
-        contentSize = CGSize(width:CGFloat(totalViewWidth), height:CGFloat(contentHeight))
+        contentSize = CGSize(width: CGFloat(totalViewWidth), height: CGFloat(contentHeight))
     }
 
     override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]? {

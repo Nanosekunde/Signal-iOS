@@ -1,10 +1,10 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "ConversationInputTextView.h"
 #import "Signal-Swift.h"
-#import <SignalMessaging/NSString+OWS.h>
+#import <SignalServiceKit/NSString+SSK.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -26,22 +26,16 @@ NS_ASSUME_NONNULL_BEGIN
         [self setTranslatesAutoresizingMaskIntoConstraints:NO];
 
         self.delegate = self;
+        self.backgroundColor = nil;
 
-        CGFloat cornerRadius = 6.0f;
-
-        self.backgroundColor = [UIColor whiteColor];
-        self.layer.borderColor = [UIColor lightGrayColor].CGColor;
-        self.layer.borderWidth = 0.5f;
-        self.layer.cornerRadius = cornerRadius;
-
-        self.scrollIndicatorInsets = UIEdgeInsetsMake(cornerRadius, 0.0f, cornerRadius, 0.0f);
+        self.scrollIndicatorInsets = UIEdgeInsetsMake(4, 4, 4, 4);
 
         self.scrollEnabled = YES;
         self.scrollsToTop = NO;
         self.userInteractionEnabled = YES;
 
-        self.font = [UIFont systemFontOfSize:16.0f];
-        self.textColor = [UIColor blackColor];
+        self.font = [UIFont ows_dynamicTypeBodyFont];
+        self.textColor = Theme.primaryColor;
         self.textAlignment = NSTextAlignmentNatural;
 
         self.contentMode = UIViewContentModeRedraw;
@@ -51,14 +45,20 @@ NS_ASSUME_NONNULL_BEGIN
 
         self.placeholderView = [UILabel new];
         self.placeholderView.text = NSLocalizedString(@"new_message", @"");
-        self.placeholderView.textColor = [UIColor lightGrayColor];
+        self.placeholderView.textColor = Theme.placeholderColor;
         self.placeholderView.userInteractionEnabled = NO;
         [self addSubview:self.placeholderView];
 
         // We need to do these steps _after_ placeholderView is configured.
         self.font = [UIFont ows_dynamicTypeBodyFont];
-        self.textContainerInset = UIEdgeInsetsMake(4.0f, 2.0f, 4.0f, 2.0f);
-        self.contentInset = UIEdgeInsetsMake(1.0f, 0.0f, 1.0f, 0.0f);
+        CGFloat hMarginLeading = 12.f;
+        CGFloat hMarginTrailing = 24.f;
+        self.textContainerInset = UIEdgeInsetsMake(7.f,
+            CurrentAppContext().isRTL ? hMarginTrailing : hMarginLeading,
+            7.f,
+            CurrentAppContext().isRTL ? hMarginLeading : hMarginTrailing);
+        self.textContainer.lineFragmentPadding = 0;
+        self.contentInset = UIEdgeInsetsZero;
 
         [self ensurePlaceholderConstraints];
         [self updatePlaceholderVisibility];
@@ -67,11 +67,22 @@ NS_ASSUME_NONNULL_BEGIN
     return self;
 }
 
+#pragma mark -
+
 - (void)setFont:(UIFont *_Nullable)font
 {
     [super setFont:font];
 
     self.placeholderView.font = font;
+}
+
+- (void)setContentOffset:(CGPoint)contentOffset animated:(BOOL)isAnimated
+{
+    // When creating new lines, contentOffset is animated, but because because
+    // we are simultaneously resizing the text view, this can cause the
+    // text in the textview to be "too high" in the text view.
+    // Solution is to disable animation for setting content offset.
+    [super setContentOffset:contentOffset animated:NO];
 }
 
 - (void)setContentInset:(UIEdgeInsets)contentInset
@@ -90,7 +101,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)ensurePlaceholderConstraints
 {
-    OWSAssert(self.placeholderView);
+    OWSAssertDebug(self.placeholderView);
 
     if (self.placeholderConstraints) {
         [NSLayoutConstraint deactivateConstraints:self.placeholderConstraints];
@@ -104,10 +115,15 @@ NS_ASSUME_NONNULL_BEGIN
     CGRect beginningTextRect = [self firstRectForRange:beginningTextRange];
 
     CGFloat topInset = beginningTextRect.origin.y;
+    CGFloat leadingInset = beginningTextRect.origin.x;
 
     self.placeholderConstraints = @[
-        [self.placeholderView autoPinLeadingToSuperview],
-        [self.placeholderView autoPinTrailingToSuperview],
+        [self.placeholderView autoMatchDimension:ALDimensionWidth
+                                     toDimension:ALDimensionWidth
+                                          ofView:self
+                                      withOffset:-leadingInset],
+        [self.placeholderView autoPinEdgeToSuperviewEdge:ALEdgeTrailing],
+        [self.placeholderView autoPinEdgeToSuperviewEdge:ALEdgeLeading withInset:leadingInset],
         [self.placeholderView autoPinEdgeToSuperviewEdge:ALEdgeTop withInset:topInset],
     ];
 }
@@ -127,6 +143,17 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)canBecomeFirstResponder
 {
     return YES;
+}
+
+- (BOOL)becomeFirstResponder
+{
+    BOOL result = [super becomeFirstResponder];
+
+    if (result) {
+        [self.textViewToolbarDelegate textViewDidBecomeFirstResponder:self];
+    }
+
+    return result;
 }
 
 - (BOOL)pasteboardHasPossibleAttachment
@@ -165,25 +192,20 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - UITextViewDelegate
 
-- (void)textViewDidBeginEditing:(UITextView *)textView
-{
-    // TODO: Is this necessary?
-
-    [textView becomeFirstResponder];
-}
-
 - (void)textViewDidChange:(UITextView *)textView
 {
-    OWSAssert(self.textViewToolbarDelegate);
+    OWSAssertDebug(self.inputTextViewDelegate);
+    OWSAssertDebug(self.textViewToolbarDelegate);
 
     [self updatePlaceholderVisibility];
 
-    [self.textViewToolbarDelegate textViewDidChange];
+    [self.inputTextViewDelegate textViewDidChange:self];
+    [self.textViewToolbarDelegate textViewDidChange:self];
 }
 
-- (void)textViewDidEndEditing:(UITextView *)textView
+- (void)textViewDidChangeSelection:(UITextView *)textView
 {
-    [textView resignFirstResponder];
+    [self.textViewToolbarDelegate textViewDidChangeSelection:self];
 }
 
 #pragma mark - Key Commands
@@ -215,19 +237,15 @@ NS_ASSUME_NONNULL_BEGIN
                                action:(SEL)action
                  discoverabilityTitle:(NSString *)discoverabilityTitle
 {
-    if (SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(9, 0)) {
-        return [UIKeyCommand keyCommandWithInput:input
-                                   modifierFlags:modifierFlags
-                                          action:action
-                            discoverabilityTitle:discoverabilityTitle];
-    } else {
-        return [UIKeyCommand keyCommandWithInput:input modifierFlags:modifierFlags action:action];
-    }
+    return [UIKeyCommand keyCommandWithInput:input
+                               modifierFlags:modifierFlags
+                                      action:action
+                        discoverabilityTitle:discoverabilityTitle];
 }
 
 - (void)modifiedReturnPressed:(UIKeyCommand *)sender
 {
-    DDLogInfo(@"%@ modifiedReturnPressed: %@", self.logTag, sender.input);
+    OWSLogInfo(@"modifiedReturnPressed: %@", sender.input);
     [self.inputTextViewDelegate inputTextViewSendMessagePressed];
 }
 

@@ -1,10 +1,11 @@
 //
-//  Copyright (c) 2017 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSOutgoingSentMessageTranscript.h"
-#import "OWSSignalServiceProtos.pb.h"
 #import "TSOutgoingMessage.h"
+#import "TSThread.h"
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -17,43 +18,121 @@ NS_ASSUME_NONNULL_BEGIN
  * recipientId is nil when building "sent" sync messages for messages
  * sent to groups.
  */
-- (OWSSignalServiceProtosDataMessage *)buildDataMessage:(NSString *_Nullable)recipientId;
+- (nullable SSKProtoDataMessage *)buildDataMessage:(NSString *_Nullable)recipientId;
 
 @end
+
+#pragma mark -
 
 @interface OWSOutgoingSentMessageTranscript ()
 
 @property (nonatomic, readonly) TSOutgoingMessage *message;
 
+// sentRecipientId is the recipient of message, for contact thread messages.
+// It is used to identify the thread/conversation to desktop.
+@property (nonatomic, readonly, nullable) NSString *sentRecipientId;
+
+@property (nonatomic, readonly) BOOL isRecipientUpdate;
+
 @end
+
+#pragma mark -
 
 @implementation OWSOutgoingSentMessageTranscript
 
-- (instancetype)initWithOutgoingMessage:(TSOutgoingMessage *)message
+- (instancetype)initWithOutgoingMessage:(TSOutgoingMessage *)message isRecipientUpdate:(BOOL)isRecipientUpdate
 {
-    self = [super init];
+    OWSAssertDebug(message);
+
+    // The sync message's timestamp must match the original outgoing message's timestamp.
+    self = [super initWithTimestamp:message.timestamp];
 
     if (!self) {
         return self;
     }
 
     _message = message;
+    // This will be nil for groups.
+    _sentRecipientId = message.thread.contactIdentifier;
+    _isRecipientUpdate = isRecipientUpdate;
 
     return self;
 }
 
-- (OWSSignalServiceProtosSyncMessageBuilder *)syncMessageBuilder
+- (nullable instancetype)initWithCoder:(NSCoder *)coder
 {
-    OWSSignalServiceProtosSyncMessageBuilder *syncMessageBuilder = [OWSSignalServiceProtosSyncMessageBuilder new];
+    return [super initWithCoder:coder];
+}
 
-    OWSSignalServiceProtosSyncMessageSentBuilder *sentBuilder = [OWSSignalServiceProtosSyncMessageSentBuilder new];
-    [sentBuilder setTimestamp:self.message.timestamp];
-    [sentBuilder setDestination:self.message.recipientIdentifier];
-    [sentBuilder setMessage:[self.message buildDataMessage:self.message.recipientIdentifier]];
+- (nullable SSKProtoSyncMessageBuilder *)syncMessageBuilder
+{
+    SSKProtoSyncMessageSentBuilder *sentBuilder = [SSKProtoSyncMessageSent builder];
+    [sentBuilder setTimestamp:self.timestamp];
+    [sentBuilder setDestination:self.sentRecipientId];
+    [sentBuilder setIsRecipientUpdate:self.isRecipientUpdate];
+
+    SSKProtoDataMessage *_Nullable dataMessage;
+    if (self.message.isViewOnceMessage) {
+        // Create data message without renderable content.
+        SSKProtoDataMessageBuilder *dataBuilder = [SSKProtoDataMessage builder];
+        [dataBuilder setTimestamp:self.message.timestamp];
+
+        OWSAssertDebug(SSKFeatureFlags.viewOnceSending);
+        [dataBuilder setIsViewOnce:YES];
+        [dataBuilder setRequiredProtocolVersion:(uint32_t)SSKProtos.viewOnceMessagesProtocolVersion];
+
+        NSError *error;
+        dataMessage = [dataBuilder buildAndReturnError:&error];
+        if (error || !dataMessage) {
+            OWSFailDebug(@"could not build protobuf: %@", error);
+            return nil;
+        }
+    } else {
+        dataMessage = [self.message buildDataMessage:self.sentRecipientId];
+    }
+    if (!dataMessage) {
+        OWSFailDebug(@"could not build protobuf.");
+        return nil;
+    }
+
+    [sentBuilder setMessage:dataMessage];
     [sentBuilder setExpirationStartTimestamp:self.message.timestamp];
 
-    [syncMessageBuilder setSentBuilder:sentBuilder];
+    for (NSString *recipientId in self.message.sentRecipientIds) {
+        TSOutgoingMessageRecipientState *_Nullable recipientState =
+            [self.message recipientStateForRecipientId:recipientId];
+        if (!recipientState) {
+            OWSFailDebug(@"missing recipient state for: %@", recipientId);
+            continue;
+        }
+        if (recipientState.state != OWSOutgoingMessageRecipientStateSent) {
+            OWSFailDebug(@"unexpected recipient state for: %@", recipientId);
+            continue;
+        }
 
+        NSError *error;
+        SSKProtoSyncMessageSentUnidentifiedDeliveryStatusBuilder *statusBuilder =
+            [SSKProtoSyncMessageSentUnidentifiedDeliveryStatus builder];
+        [statusBuilder setDestination:recipientId];
+        [statusBuilder setUnidentified:recipientState.wasSentByUD];
+        SSKProtoSyncMessageSentUnidentifiedDeliveryStatus *_Nullable status =
+            [statusBuilder buildAndReturnError:&error];
+        if (error || !status) {
+            OWSFailDebug(@"Couldn't build UD status proto: %@", error);
+            continue;
+        }
+        [sentBuilder addUnidentifiedStatus:status];
+    }
+
+    NSError *error;
+    SSKProtoSyncMessageSent *_Nullable sentProto = [sentBuilder buildAndReturnError:&error];
+    if (error || !sentProto) {
+        OWSFailDebug(@"could not build protobuf: %@", error);
+        return nil;
+    }
+
+    SSKProtoSyncMessageBuilder *syncMessageBuilder = [SSKProtoSyncMessage builder];
+    [syncMessageBuilder setSent:sentProto];
     return syncMessageBuilder;
 }
 
